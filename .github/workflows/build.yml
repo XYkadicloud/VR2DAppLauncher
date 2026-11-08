@@ -61,8 +61,6 @@ jobs:
         run: |
           chmod +x gradlew
           ./gradlew :sdk:assembleRelease --no-daemon --stacktrace
-        env:
-          GRADLE_OPTS: "-Dorg.gradle.jvmargs=-Xmx4g -XX:+HeapDumpOnOutOfMemoryError"
 
       - name: Copy Cardboard SDK AAR to VR2DAppLauncher
         run: |
@@ -77,8 +75,6 @@ jobs:
       - name: Build Debug APK
         working-directory: VR2DAppLauncher
         run: ./gradlew assembleDebug --no-daemon --stacktrace
-        env:
-          GRADLE_OPTS: "-Dorg.gradle.jvmargs=-Xmx2g -XX:+HeapDumpOnOutOfMemoryError"
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
@@ -150,8 +146,6 @@ jobs:
         run: |
           chmod +x gradlew
           ./gradlew :sdk:assembleRelease --no-daemon --stacktrace
-        env:
-          GRADLE_OPTS: "-Dorg.gradle.jvmargs=-Xmx4g -XX:+HeapDumpOnOutOfMemoryError"
 
       - name: Copy Cardboard SDK AAR to VR2DAppLauncher
         run: |

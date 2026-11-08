@@ -19,7 +19,7 @@ Thumbs.db
 
 # Local config
 local.properties
-gradle.properties
+# gradle.properties is committed for CI build configuration
 
 # Output
 *.apk
