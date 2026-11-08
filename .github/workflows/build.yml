@@ -16,11 +16,20 @@ jobs:
   build:
     name: Build Debug APK
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
 
     steps:
-      - name: Checkout repository
+      - name: Checkout VR2DAppLauncher repository
         uses: actions/checkout@v4
+        with:
+          path: VR2DAppLauncher
+
+      - name: Checkout Cardboard SDK source (for building AAR)
+        uses: actions/checkout@v4
+        with:
+          repository: googlevr/cardboard
+          ref: v1.36.0
+          path: cardboard-sdk
 
       - name: Setup Java 17
         uses: actions/setup-java@v4
@@ -47,35 +56,26 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-gradle-
 
-      - name: Download Cardboard SDK AAR
-        id: cardboard
+      - name: Build Cardboard SDK AAR
+        working-directory: cardboard-sdk
         run: |
-          mkdir -p app/libs
-          # Try to download Google Cardboard SDK v1.36.0
-          # Official Maven doesn't have it, try from known mirrors
-          CARDBOARD_URL="https://github.com/googlevr/cardboard-java/releases/download/v1.36.0/cardboard-sdk-1.36.0.aar"
-          if curl -L -f -o app/libs/cardboard-sdk.aar "$CARDBOARD_URL" 2>/dev/null; then
-            echo "Downloaded Cardboard SDK from GitHub releases"
-          else
-            # Fallback: try Maven Central (may not have 1.36.0)
-            MAVEN_URL="https://repo1.maven.org/maven2/com/google/vr/sdk/cardboard/1.36.0/cardboard-1.36.0.aar"
-            if curl -L -f -o app/libs/cardboard-sdk.aar "$MAVEN_URL" 2>/dev/null; then
-              echo "Downloaded Cardboard SDK from Maven Central"
-            else
-              echo "::warning::Could not download Cardboard SDK AAR. Build may fail."
-              echo "cardboard_downloaded=false" >> $GITHUB_OUTPUT
-              # Create a dummy AAR to avoid file not found error (build will fail at compile time)
-              echo "Creating placeholder AAR..."
-              cd app/libs
-              jar cf cardboard-sdk.aar -C /tmp empty 2>/dev/null || echo "dummy" > cardboard-sdk.aar
-            fi
-          fi
-          ls -la app/libs/
+          chmod +x gradlew
+          ./gradlew :sdk:assembleRelease --no-daemon --stacktrace
+        env:
+          GRADLE_OPTS: "-Dorg.gradle.jvmargs=-Xmx4g -XX:+HeapDumpOnOutOfMemoryError"
+
+      - name: Copy Cardboard SDK AAR to VR2DAppLauncher
+        run: |
+          mkdir -p VR2DAppLauncher/app/libs
+          cp cardboard-sdk/sdk/build/outputs/aar/sdk-release.aar VR2DAppLauncher/app/libs/cardboard-sdk.aar
+          ls -la VR2DAppLauncher/app/libs/
 
       - name: Make gradlew executable
+        working-directory: VR2DAppLauncher
         run: chmod +x gradlew
 
       - name: Build Debug APK
+        working-directory: VR2DAppLauncher
         run: ./gradlew assembleDebug --no-daemon --stacktrace
         env:
           GRADLE_OPTS: "-Dorg.gradle.jvmargs=-Xmx2g -XX:+HeapDumpOnOutOfMemoryError"
@@ -84,7 +84,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: app-debug-apk
-          path: app/build/outputs/apk/debug/app-debug.apk
+          path: VR2DAppLauncher/app/build/outputs/apk/debug/app-debug.apk
           retention-days: 30
 
       - name: Upload build logs on failure
@@ -93,21 +93,32 @@ jobs:
         with:
           name: build-logs
           path: |
-            **/build/reports/
-            **/build/outputs/
+            VR2DAppLauncher/**/build/reports/
+            VR2DAppLauncher/**/build/outputs/
+            cardboard-sdk/**/build/reports/
+            cardboard-sdk/**/build/outputs/
           retention-days: 7
 
   # Optional: Release build on tags
   release:
     name: Build Release APK
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     if: startsWith(github.ref, 'refs/tags/v')
     needs: build
 
     steps:
-      - name: Checkout repository
+      - name: Checkout VR2DAppLauncher repository
         uses: actions/checkout@v4
+        with:
+          path: VR2DAppLauncher
+
+      - name: Checkout Cardboard SDK source (for building AAR)
+        uses: actions/checkout@v4
+        with:
+          repository: googlevr/cardboard
+          ref: v1.36.0
+          path: cardboard-sdk
 
       - name: Setup Java 17
         uses: actions/setup-java@v4
@@ -124,23 +135,41 @@ jobs:
           build-tools-version: 34.0.0
           cmdline-tools-version: latest
 
-      - name: Download Cardboard SDK AAR
+      - name: Cache Gradle packages
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
+          restore-keys: |
+            ${{ runner.os }}-gradle-
+
+      - name: Build Cardboard SDK AAR
+        working-directory: cardboard-sdk
         run: |
-          mkdir -p app/libs
-          CARDBOARD_URL="https://github.com/googlevr/cardboard-java/releases/download/v1.36.0/cardboard-sdk-1.36.0.aar"
-          curl -L -f -o app/libs/cardboard-sdk.aar "$CARDBOARD_URL" || \
-          curl -L -f -o app/libs/cardboard-sdk.aar "https://repo1.maven.org/maven2/com/google/vr/sdk/cardboard/1.36.0/cardboard-1.36.0.aar" || \
-          echo "Warning: Cardboard SDK not found"
+          chmod +x gradlew
+          ./gradlew :sdk:assembleRelease --no-daemon --stacktrace
+        env:
+          GRADLE_OPTS: "-Dorg.gradle.jvmargs=-Xmx4g -XX:+HeapDumpOnOutOfMemoryError"
+
+      - name: Copy Cardboard SDK AAR to VR2DAppLauncher
+        run: |
+          mkdir -p VR2DAppLauncher/app/libs
+          cp cardboard-sdk/sdk/build/outputs/aar/sdk-release.aar VR2DAppLauncher/app/libs/cardboard-sdk.aar
+          ls -la VR2DAppLauncher/app/libs/
 
       - name: Make gradlew executable
+        working-directory: VR2DAppLauncher
         run: chmod +x gradlew
 
       - name: Build Release APK
+        working-directory: VR2DAppLauncher
         run: ./gradlew assembleRelease --no-daemon --stacktrace
 
       - name: Upload Release APK
         uses: actions/upload-artifact@v4
         with:
           name: app-release-apk
-          path: app/build/outputs/apk/release/app-release.apk
+          path: VR2DAppLauncher/app/build/outputs/apk/release/app-release.apk
           retention-days: 90
