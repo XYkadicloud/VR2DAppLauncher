@@ -10,21 +10,21 @@ import com.google.cardboard.sdk.CardboardView
 import com.google.cardboard.sdk.HeadTransform
 import com.google.cardboard.sdk.Viewport
 import com.vr2dapplauncher.shizuku.VrVirtualDisplayHost
+import com.vr2dapplauncher.util.Diagnostics
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.nio.FloatBuffer
 import javax.microedition.khronos.egl.EGLConfig
 
 /**
- * VR 窗口渲染器：在 VR 中渲染多个应用窗口
+ * VR 多窗口渲染器：每个窗口采样自己那块独立虚拟屏的 GL 纹理。
  *
- * 全量审查修正：
- *  - 所有 shader 常量改用 `val`（const val 不能调用 trimIndent()，会编译失败）；
- *  - WINDOW_FRAGMENT_SHADER 首行加 #extension（samplerExternalOES 必需）；
- *  - onDrawEye 不再 glClear()（SDK 共享 FBO 只清一次，否则右眼擦掉左眼）；
- *  - selectedWindowId 改为 public（VrActivity 需要读写）；
- *  - dragWindowStartBounds 用局部 val 智能转换，避免 nullable var 属性无法 smart cast；
- *  - 移除对 UI shader 中不存在的 uTexture uniform 的 glUniform1i 调用。
+ * 关键点：
+ *  - 每块虚拟屏一个 SurfaceTexture / 一张 GL_TEXTURE_EXTERNAL_OES，互不共用；
+ *  - onSurfaceCreated 在 GL 线程里建屏（有 EGL context），避免无 context 建 SurfaceTexture；
+ *  - onDrawEye 内不 glClear（Cardboard SDK 共享 FBO 只清一次，否则右眼擦掉左眼）；
+ *  - shader 编译/链接状态检查，失败写诊断日志，便于真机定位黑屏；
+ *  - 无应用时画占位色窗口，保证不是全黑。
  */
 class VrWindowRenderer(
     private val context: Context,
@@ -34,7 +34,7 @@ class VrWindowRenderer(
 ) : CardboardView.Renderer {
 
     companion object {
-        private val TAG = "VrWindowRenderer"
+        private const val TAG = "VrWindowRenderer"
 
         private val WINDOW_VERTEX_SHADER = """
             attribute vec4 aPosition;
@@ -48,7 +48,7 @@ class VrWindowRenderer(
             }
         """.trimIndent()
 
-        // #extension MUST be the first directive in a GLES ES 1.00 fragment shader.
+        // #extension 必须是 fragment shader 的第一行，前面不能有空行或缩进。
         private val WINDOW_FRAGMENT_SHADER = """#extension GL_OES_EGL_image_external : require
             precision mediump float;
             uniform samplerExternalOES uTexture;
@@ -61,9 +61,12 @@ class VrWindowRenderer(
             uniform float uChromaticAberration;
             varying vec2 vTexCoord;
             void main() {
-                vec4 color = uIsTexture == 1
-                    ? texture2D(uTexture, vTexCoord)
-                    : uColor;
+                // 用 if/else 而不是三元表达式：部分 GLES 驱动对
+                // "三元表达式里采样 samplerExternalOES" 的编译行为不一致。
+                vec4 color = uColor;
+                if (uIsTexture == 1) {
+                    color = texture2D(uTexture, vTexCoord);
+                }
                 color.rgb *= uBrightness;
                 color.rgb = (color.rgb - 0.5) * uContrast + 0.5;
                 float gray = dot(color.rgb, vec3(0.299, 0.587, 0.114));
@@ -74,18 +77,6 @@ class VrWindowRenderer(
                 color.rg += uChromaticAberration * (vTexCoord - 0.5) * 0.01;
                 gl_FragColor = color;
             }
-        """.trimIndent()
-
-        private val BORDER_VERTEX_SHADER = """
-            attribute vec4 aPosition;
-            uniform mat4 uMVP;
-            void main() { gl_Position = uMVP * aPosition; }
-        """.trimIndent()
-
-        private val BORDER_FRAGMENT_SHADER = """
-            precision mediump float;
-            uniform vec4 uColor;
-            void main() { gl_FragColor = uColor; }
         """.trimIndent()
 
         private val UI_VERTEX_SHADER = """
@@ -101,12 +92,9 @@ class VrWindowRenderer(
         """.trimIndent()
     }
 
-    // 着色器程序
     private var windowProgram: Int = 0
-    private var borderProgram: Int = 0
     private var uiProgram: Int = 0
 
-    // Window 着色器句柄
     private var wPositionHandle: Int = 0
     private var wTexCoordHandle: Int = 0
     private var wMvpHandle: Int = 0
@@ -120,66 +108,35 @@ class VrWindowRenderer(
     private var wVignetteHandle: Int = 0
     private var wChromaticAberrationHandle: Int = 0
 
-    // Border 着色器句柄
-    private var bPositionHandle: Int = 0
-    private var bMvpHandle: Int = 0
-    private var bColorHandle: Int = 0
-
-    // UI 着色器句柄
     private var uPositionHandle: Int = 0
     private var uMvpHandle: Int = 0
     private var uColorHandle: Int = 0
 
-    // 顶点缓冲区
     private val quadVertexBuffer: FloatBuffer
     private val quadTexCoordBuffer: FloatBuffer
-    private val borderVertexBuffer: FloatBuffer
     private val uiQuadBuffer: FloatBuffer
 
-    // MVP 矩阵
-    private val viewMatrix = FloatArray(16)
     private val projectionMatrix = FloatArray(16)
     private val mvpMatrix = FloatArray(16)
-
-    // ST 矩阵
-    private val stMatrix = FloatArray(16).apply {
-        this[0] = 1f; this[5] = 1f; this[10] = 1f; this[15] = 1f
-    }
-
-    // 头部姿态
     private val headQuaternion = FloatArray(4).also { it[3] = 1f }
 
-    // 交互状态（selectedWindowId 为 public，VrActivity 会读写）
-    private var hoveredWindowId: Long = -1
     var selectedWindowId: Long = -1
     private var isDragging = false
     private var isResizing = false
-    private var dragStartX = 0f
-    private var dragStartY = 0f
     private var dragWindowStartBounds: Rect? = null
-
-    // 虚拟显示器纹理
-    private var displayTextureId = 0
 
     init {
         val vertices = floatArrayOf(-1f, -1f, 0f, 1f, -1f, 0f, -1f, 1f, 0f, 1f, 1f, 0f)
-        quadVertexBuffer = ByteBuffer.allocateDirect(vertices.size * 4).order(ByteOrder.nativeOrder())
-            .asFloatBuffer().apply { put(vertices); position(0) }
+        quadVertexBuffer = ByteBuffer.allocateDirect(vertices.size * 4)
+            .order(ByteOrder.nativeOrder()).asFloatBuffer().apply { put(vertices); position(0) }
 
         val texCoords = floatArrayOf(0f, 1f, 1f, 1f, 0f, 0f, 1f, 0f)
-        quadTexCoordBuffer = ByteBuffer.allocateDirect(texCoords.size * 4).order(ByteOrder.nativeOrder())
-            .asFloatBuffer().apply { put(texCoords); position(0) }
-
-        val borderVertices = floatArrayOf(
-            -1.02f, -1.02f, 0.01f, 1.02f, -1.02f, 0.01f,
-            -1.02f, 1.02f, 0.01f, 1.02f, 1.02f, 0.01f
-        )
-        borderVertexBuffer = ByteBuffer.allocateDirect(borderVertices.size * 4).order(ByteOrder.nativeOrder())
-            .asFloatBuffer().apply { put(borderVertices); position(0) }
+        quadTexCoordBuffer = ByteBuffer.allocateDirect(texCoords.size * 4)
+            .order(ByteOrder.nativeOrder()).asFloatBuffer().apply { put(texCoords); position(0) }
 
         val uiVertices = floatArrayOf(-1f, -1f, 0f, 1f, -1f, 0f, -1f, 1f, 0f, 1f, 1f, 0f)
-        uiQuadBuffer = ByteBuffer.allocateDirect(uiVertices.size * 4).order(ByteOrder.nativeOrder())
-            .asFloatBuffer().apply { put(uiVertices); position(0) }
+        uiQuadBuffer = ByteBuffer.allocateDirect(uiVertices.size * 4)
+            .order(ByteOrder.nativeOrder()).asFloatBuffer().apply { put(uiVertices); position(0) }
     }
 
     override fun onSurfaceCreated(config: EGLConfig) {
@@ -205,20 +162,35 @@ class VrWindowRenderer(
         wVignetteHandle = GLES20.glGetUniformLocation(windowProgram, "uVignette")
         wChromaticAberrationHandle = GLES20.glGetUniformLocation(windowProgram, "uChromaticAberration")
 
-        borderProgram = createProgram(BORDER_VERTEX_SHADER, BORDER_FRAGMENT_SHADER)
-        bPositionHandle = GLES20.glGetAttribLocation(borderProgram, "aPosition")
-        bMvpHandle = GLES20.glGetUniformLocation(borderProgram, "uMVP")
-        bColorHandle = GLES20.glGetUniformLocation(borderProgram, "uColor")
-
         uiProgram = createProgram(UI_VERTEX_SHADER, UI_FRAGMENT_SHADER)
         uPositionHandle = GLES20.glGetAttribLocation(uiProgram, "aPosition")
         uMvpHandle = GLES20.glGetUniformLocation(uiProgram, "uMVP")
         uColorHandle = GLES20.glGetUniformLocation(uiProgram, "uColor")
 
-        Log.d(TAG, "Shaders created: window=$windowProgram, border=$borderProgram, ui=$uiProgram")
+        Diagnostics.record(TAG, "programs: window=$windowProgram ui=$uiProgram")
 
-        displayTextureId = virtualDisplayHost.createGlTextureOnGlThread()
-        virtualDisplayHost.onGlThreadReady?.invoke(displayTextureId)
+        // ★ 在 GL 线程里创建所有独立虚拟屏，并按屏同步 VR 窗口
+        val created = virtualDisplayHost.ensureDisplaysOnGlThread()
+        val descriptors = virtualDisplayHost.descriptors()
+        // 没授权 / 没建出任何屏时也要留一个占位窗口，避免 VR 全黑且毫无提示。
+        windowManager.syncFromSlots(
+            if (descriptors.isEmpty()) {
+                listOf(
+                    WindowManager.SlotDescriptor(
+                        index = 0,
+                        title = virtualDisplayHost.lastError ?: "未授权屏幕捕获 / 未选择应用",
+                        packageName = "",
+                        displayId = -1,
+                        hasTexture = false
+                    )
+                )
+            } else {
+                descriptors
+            }
+        )
+        val first = windowManager.getVisibleWindows().firstOrNull()
+        if (first != null) selectedWindowId = first.id
+        Diagnostics.record(TAG, "GL ready: $created displays, ${windowManager.getVisibleWindows().size} windows")
     }
 
     override fun onSurfaceChanged(width: Int, height: Int) {
@@ -226,16 +198,17 @@ class VrWindowRenderer(
     }
 
     override fun onNewFrame(headTransform: HeadTransform) {
-        headTransform.getQuaternion(headQuaternion, 0)
-
-        val surfaceTexture = virtualDisplayHost.getSurfaceTexture()
-        surfaceTexture?.updateTexImage()
-        surfaceTexture?.getTransformMatrix(stMatrix)
+        try {
+            headTransform.getQuaternion(headQuaternion, 0)
+        } catch (e: Exception) {
+            Log.w(TAG, "getQuaternion failed", e)
+        }
+        // 每块虚拟屏各自的纹理更新；单个失败不影响其它窗口
+        virtualDisplayHost.updateTexImages()
     }
 
     override fun onDrawEye(eye: CardboardView.Eye) {
-        // 不要 glClear()：Cardboard SDK 只清一次共享 FBO，左右眼靠 glViewport 区分；
-        // 在这里 clear 会在画右眼时把左眼擦掉。黑底由 glClearColor + SDK 的 clear 提供。
+        // 不要 glClear()：SDK 共享 FBO 只清一次，左右眼靠 glViewport 区分。
         val eyeView = eye.getEyeView()
         val projection = eye.getPerspective(0.1f, 100f)
 
@@ -243,16 +216,14 @@ class VrWindowRenderer(
         Matrix.setIdentityM(headRotation, 0)
         applyQuaternionRotation(headRotation, headQuaternion)
 
-        // MVP = projection * headRotation * eyeView
         val tmp = FloatArray(16)
         Matrix.multiplyMM(tmp, 0, headRotation, 0, eyeView, 0)
         Matrix.multiplyMM(mvpMatrix, 0, projection, 0, tmp, 0)
+        System.arraycopy(projection, 0, projectionMatrix, 0, 16)
 
-        val windows = windowManager.getVisibleWindows()
-        for (window in windows) {
+        for (window in windowManager.getVisibleWindows()) {
             renderWindow(window)
         }
-        renderWindowUI(windows)
     }
 
     override fun onFinishFrame(viewport: Viewport) {
@@ -261,16 +232,14 @@ class VrWindowRenderer(
 
     override fun onRendererShutdown() {
         GLES20.glDeleteProgram(windowProgram)
-        GLES20.glDeleteProgram(borderProgram)
         GLES20.glDeleteProgram(uiProgram)
-        windowProgram = 0; borderProgram = 0; uiProgram = 0
+        windowProgram = 0
+        uiProgram = 0
     }
 
     private fun renderWindow(window: WindowManager.WindowInfo) {
-        val isFocused = (window.id == windowManager.focusedWindowId)
-        val isSelected = (window.id == selectedWindowId)
-        val isHovered = (window.id == hoveredWindowId)
-
+        val isFocused = window.id == windowManager.focusedWindowId
+        val isSelected = window.id == selectedWindowId
         val bounds = window.bounds
         val displayW = windowManager.displayWidth.toFloat()
         val displayH = windowManager.displayHeight.toFloat()
@@ -288,20 +257,33 @@ class VrWindowRenderer(
         val finalMvp = FloatArray(16)
         Matrix.multiplyMM(finalMvp, 0, mvpMatrix, 0, windowMatrix, 0)
 
+        val texId = virtualDisplayHost.texIdFor(window.slotIndex)
+        val useTexture = texId > 0 && !window.isPlaceholder
+
         GLES20.glUseProgram(windowProgram)
         GLES20.glUniformMatrix4fv(wMvpHandle, 1, false, finalMvp, 0)
-        GLES20.glUniformMatrix4fv(wStMatrixHandle, 1, false, stMatrix, 0)
-        GLES20.glUniform1i(wIsTextureHandle, 1)
-        GLES20.glUniform4f(wColorHandle, 1f, 1f, 1f, 1f)
+        GLES20.glUniformMatrix4fv(
+            wStMatrixHandle, 1, false, virtualDisplayHost.stMatrixFor(window.slotIndex), 0
+        )
+        GLES20.glUniform1i(wIsTextureHandle, if (useTexture) 1 else 0)
+        GLES20.glUniform4f(
+            wColorHandle,
+            if (window.isPlaceholder) 0.10f else 0.16f,
+            if (window.isPlaceholder) 0.12f else 0.18f,
+            if (window.isPlaceholder) 0.20f else 0.24f,
+            1f
+        )
         GLES20.glUniform1f(wBrightnessHandle, settings.brightness)
         GLES20.glUniform1f(wContrastHandle, settings.contrast)
         GLES20.glUniform1f(wSaturationHandle, settings.saturation)
         GLES20.glUniform1f(wVignetteHandle, settings.vignette)
         GLES20.glUniform1f(wChromaticAberrationHandle, settings.chromaticAberration)
 
-        GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
-        GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, displayTextureId)
-        GLES20.glUniform1i(wTexHandle, 0)
+        if (useTexture) {
+            GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
+            GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, texId)
+            GLES20.glUniform1i(wTexHandle, 0)
+        }
 
         GLES20.glEnableVertexAttribArray(wPositionHandle)
         GLES20.glVertexAttribPointer(wPositionHandle, 3, GLES20.GL_FLOAT, false, 12, quadVertexBuffer)
@@ -311,81 +293,44 @@ class VrWindowRenderer(
         GLES20.glDisableVertexAttribArray(wPositionHandle)
         GLES20.glDisableVertexAttribArray(wTexCoordHandle)
 
-        // Border
-        val borderColor = if (isFocused) floatArrayOf(0.2f, 0.6f, 1f, 1f)
-        else if (isHovered) floatArrayOf(1f, 0.8f, 0f, 1f)
-        else floatArrayOf(0.4f, 0.4f, 0.4f, 1f)
-        GLES20.glUseProgram(borderProgram)
-        GLES20.glUniformMatrix4fv(bMvpHandle, 1, false, finalMvp, 0)
-        GLES20.glUniform4fv(bColorHandle, 1, borderColor, 0)
-        GLES20.glEnableVertexAttribArray(bPositionHandle)
-        GLES20.glVertexAttribPointer(bPositionHandle, 3, GLES20.GL_FLOAT, false, 12, borderVertexBuffer)
-        GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
-        GLES20.glDisableVertexAttribArray(bPositionHandle)
+        if (useTexture) {
+            GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, 0)
+        }
 
-        // Title bar + buttons
-        if (isFocused || isSelected || isHovered) {
-            drawTitleBar(window, windowMatrix, isFocused)
-            drawControlButtons(window, windowMatrix)
+        // 边框（焦点=蓝，选中=黄，普通=灰）
+        val borderColor = if (isFocused) {
+            floatArrayOf(0.2f, 0.6f, 1f, 1f)
+        } else if (isSelected) {
+            floatArrayOf(1f, 0.8f, 0f, 1f)
+        } else {
+            floatArrayOf(0.35f, 0.35f, 0.35f, 1f)
+        }
+        drawUiQuad(finalMvp, borderColor, outline = true)
+
+        // 标题栏
+        if (isFocused || isSelected) {
+            val titleMatrix = windowMatrix.copyOf()
+            Matrix.translateM(titleMatrix, 0, 0f, 1.06f, 0f)
+            Matrix.scaleM(titleMatrix, 0, 1f, 0.10f, 1f)
+            val titleMvp = FloatArray(16)
+            Matrix.multiplyMM(titleMvp, 0, mvpMatrix, 0, titleMatrix, 0)
+            drawUiQuad(titleMvp, floatArrayOf(0.15f, 0.35f, 0.7f, 0.95f), outline = false)
         }
     }
 
-    private fun drawTitleBar(window: WindowManager.WindowInfo, windowMatrix: FloatArray, isFocused: Boolean) {
-        // Matrix.multiplyMM 要求 result 与输入不是同一数组；这里等价于复制 windowMatrix。
-        val titleMatrix = windowMatrix.copyOf()
-        Matrix.translateM(titleMatrix, 0, 0f, 1.05f, 0f)
-        Matrix.scaleM(titleMatrix, 0, 1f, 0.08f, 1f)
-
-        val finalMvp = FloatArray(16)
-        Matrix.multiplyMM(finalMvp, 0, mvpMatrix, 0, titleMatrix, 0)
-
+    private fun drawUiQuad(mvp: FloatArray, color: FloatArray, outline: Boolean) {
         GLES20.glUseProgram(uiProgram)
-        GLES20.glUniformMatrix4fv(uMvpHandle, 1, false, finalMvp, 0)
-        val titleColor = if (isFocused) floatArrayOf(0.2f, 0.4f, 0.8f, 0.9f)
-        else floatArrayOf(0.3f, 0.3f, 0.3f, 0.9f)
-        GLES20.glUniform4fv(uColorHandle, 1, titleColor, 0)
-        // UI shader 没有 uTexture uniform，不能再调 glUniform1i(uTexHandle, ...)。
-
+        GLES20.glUniformMatrix4fv(uMvpHandle, 1, false, mvp, 0)
+        GLES20.glUniform4fv(uColorHandle, 1, color, 0)
         GLES20.glEnableVertexAttribArray(uPositionHandle)
         GLES20.glVertexAttribPointer(uPositionHandle, 3, GLES20.GL_FLOAT, false, 12, uiQuadBuffer)
-        GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
+        GLES20.glDrawArrays(
+            if (outline) GLES20.GL_LINE_STRIP else GLES20.GL_TRIANGLE_STRIP, 0, 4
+        )
         GLES20.glDisableVertexAttribArray(uPositionHandle)
     }
 
-    private fun drawControlButtons(window: WindowManager.WindowInfo, windowMatrix: FloatArray) {
-        val buttonColors = arrayOf(
-            floatArrayOf(1f, 0.8f, 0f, 1f),   // 黄色
-            floatArrayOf(0f, 0.8f, 0f, 1f),   // 绿色
-            floatArrayOf(1f, 0.2f, 0.2f, 1f)  // 红色
-        )
-
-        for (i in 0..2) {
-            // 同上：直接复制，避免 multiplyMM 的 result/input 别名。
-            val buttonMatrix = windowMatrix.copyOf()
-            val buttonX = 0.9f - i * 0.1f
-            Matrix.translateM(buttonMatrix, 0, buttonX, 1.05f, 0f)
-            Matrix.scaleM(buttonMatrix, 0, 0.07f, 0.07f, 1f)
-
-            val finalMvp = FloatArray(16)
-            Matrix.multiplyMM(finalMvp, 0, mvpMatrix, 0, buttonMatrix, 0)
-
-            GLES20.glUseProgram(uiProgram)
-            GLES20.glUniformMatrix4fv(uMvpHandle, 1, false, finalMvp, 0)
-            GLES20.glUniform4fv(uColorHandle, 1, buttonColors[i], 0)
-
-            GLES20.glEnableVertexAttribArray(uPositionHandle)
-            GLES20.glVertexAttribPointer(uPositionHandle, 3, GLES20.GL_FLOAT, false, 12, uiQuadBuffer)
-            GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
-            GLES20.glDisableVertexAttribArray(uPositionHandle)
-        }
-    }
-
-    private fun renderWindowUI(windows: List<WindowManager.WindowInfo>) {
-        // UI 已在 renderWindow 内绘制
-    }
-
     private fun applyQuaternionRotation(matrix: FloatArray, q: FloatArray) {
-        // Kotlin 不支持 Java 那种 "val a = ..., b = ..." 一行多声明，必须逐个写。
         val x = q[0]
         val y = q[1]
         val z = q[2]
@@ -412,29 +357,43 @@ class VrWindowRenderer(
         matrix[9] = 2 * (yz + wx)
         matrix[10] = 1 - 2 * (xx + yy)
         matrix[11] = 0f
-        matrix[12] = 0f; matrix[13] = 0f; matrix[14] = 0f; matrix[15] = 1f
+        matrix[12] = 0f
+        matrix[13] = 0f
+        matrix[14] = 0f
+        matrix[15] = 1f
+    }
+
+    private fun compileShader(type: Int, source: String): Int {
+        val shader = GLES20.glCreateShader(type)
+        GLES20.glShaderSource(shader, source)
+        GLES20.glCompileShader(shader)
+        val status = IntArray(1)
+        GLES20.glGetShaderiv(shader, GLES20.GL_COMPILE_STATUS, status, 0)
+        if (status[0] == 0) {
+            val info = GLES20.glGetShaderInfoLog(shader)
+            Log.e(TAG, "shader($type) compile failed: $info")
+            Diagnostics.record(TAG, "shader($type) compile failed: $info")
+        }
+        return shader
     }
 
     private fun createProgram(vertexSource: String, fragmentSource: String): Int {
-        val vertexShader = GLES20.glCreateShader(GLES20.GL_VERTEX_SHADER).also {
-            GLES20.glShaderSource(it, vertexSource)
-            GLES20.glCompileShader(it)
+        val vertexShader = compileShader(GLES20.GL_VERTEX_SHADER, vertexSource)
+        val fragmentShader = compileShader(GLES20.GL_FRAGMENT_SHADER, fragmentSource)
+        val program = GLES20.glCreateProgram()
+        GLES20.glAttachShader(program, vertexShader)
+        GLES20.glAttachShader(program, fragmentShader)
+        GLES20.glLinkProgram(program)
+        val status = IntArray(1)
+        GLES20.glGetProgramiv(program, GLES20.GL_LINK_STATUS, status, 0)
+        if (status[0] == 0) {
+            val info = GLES20.glGetProgramInfoLog(program)
+            Log.e(TAG, "program link failed: $info")
+            Diagnostics.record(TAG, "program link failed: $info")
         }
-        val fragmentShader = GLES20.glCreateShader(GLES20.GL_FRAGMENT_SHADER).also {
-            GLES20.glShaderSource(it, fragmentSource)
-            GLES20.glCompileShader(it)
-        }
-        return GLES20.glCreateProgram().also {
-            GLES20.glAttachShader(it, vertexShader)
-            GLES20.glAttachShader(it, fragmentShader)
-            GLES20.glLinkProgram(it)
-            GLES20.glDeleteShader(vertexShader)
-            GLES20.glDeleteShader(fragmentShader)
-        }
-    }
-
-    fun updateHover(windowId: Long) {
-        hoveredWindowId = windowId
+        GLES20.glDeleteShader(vertexShader)
+        GLES20.glDeleteShader(fragmentShader)
+        return program
     }
 
     fun setSelected(windowId: Long) {
@@ -442,25 +401,21 @@ class VrWindowRenderer(
         if (windowId != -1L) windowManager.focusWindow(windowId)
     }
 
-    fun startDrag(windowId: Long, startX: Float, startY: Float) {
+    /** @param nx @param ny 归一化累计位移（相对手势起点，屏幕坐标） */
+    fun startDrag(windowId: Long) {
         val window = windowManager.getWindow(windowId)
         if (window != null) {
             isDragging = true
-            dragStartX = startX
-            dragStartY = startY
             dragWindowStartBounds = Rect(window.bounds)
         }
     }
 
-    fun updateDrag(currentX: Float, currentY: Float) {
-        // nullable var 属性无法 smart cast，必须取局部 val
+    fun updateDrag(nx: Float, ny: Float) {
         val startBounds = dragWindowStartBounds ?: return
         if (!isDragging || selectedWindowId == -1L) return
-        val dx = (currentX - dragStartX) * settings.screenWidth * 1000
-        val dy = (dragStartY - currentY) * settings.screenHeight * 1000
-        val newLeft = (startBounds.left + dx).toInt()
-        val newTop = (startBounds.top - dy).toInt()
-        windowManager.moveWindow(selectedWindowId, newLeft, newTop)
+        val dx = (nx * windowManager.displayWidth).toInt()
+        val dy = (ny * windowManager.displayHeight).toInt()
+        windowManager.moveWindow(selectedWindowId, startBounds.left + dx, startBounds.top + dy)
     }
 
     fun endDrag() {
@@ -468,24 +423,26 @@ class VrWindowRenderer(
         dragWindowStartBounds = null
     }
 
-    fun startResize(windowId: Long, startX: Float, startY: Float) {
+    fun startResize(windowId: Long) {
         val window = windowManager.getWindow(windowId)
         if (window != null) {
             isResizing = true
-            dragStartX = startX
-            dragStartY = startY
             dragWindowStartBounds = Rect(window.bounds)
         }
     }
 
-    fun updateResize(currentX: Float, currentY: Float) {
+    fun updateResize(nx: Float, ny: Float) {
         val startBounds = dragWindowStartBounds ?: return
         if (!isResizing || selectedWindowId == -1L) return
-        val dx = (currentX - dragStartX) * settings.screenWidth * 1000
-        val dy = (dragStartY - currentY) * settings.screenHeight * 1000
-        val newWidth = (startBounds.width() + dx).toInt()
-        val newHeight = (startBounds.height() - dy).toInt()
-        windowManager.resizeWindow(selectedWindowId, newWidth, newHeight, 0f, 1f)
+        val dw = (nx * windowManager.displayWidth).toInt()
+        val dh = (ny * windowManager.displayHeight).toInt()
+        windowManager.resizeWindow(
+            selectedWindowId,
+            startBounds.width() + dw,
+            startBounds.height() + dh,
+            0f,
+            0f
+        )
     }
 
     fun endResize() {

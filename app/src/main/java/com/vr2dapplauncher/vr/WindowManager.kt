@@ -6,16 +6,16 @@ import android.os.Parcelable
 import android.util.Log
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.launch
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.channels.ReceiveChannel
+import kotlinx.coroutines.launch
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicLong
 
 /**
- * 虚拟显示器窗口管理器
+ * 虚拟屏窗口管理器：一块独立虚拟屏对应一个窗口。
  */
-class WindowManager(private val context: android.content.Context, private val displayId: Int) {
+class WindowManager(private val context: android.content.Context) {
 
     companion object {
         private const val TAG = "WindowManager"
@@ -27,26 +27,29 @@ class WindowManager(private val context: android.content.Context, private val di
         const val MAX_WINDOW_HEIGHT = 1080
     }
 
-    // 窗口存储
+    /** VrVirtualDisplayHost 传来的轻量描述（避免 vr 包反向依赖 shizuku 包）。 */
+    data class SlotDescriptor(
+        val index: Int,
+        val title: String,
+        val packageName: String,
+        val displayId: Int,
+        val hasTexture: Boolean
+    )
+
     private val windows = ConcurrentHashMap<Long, WindowInfo>()
     private val windowIdGenerator = AtomicLong(1)
 
-    // 事件通道
     private val windowEventsChannel = Channel<WindowEvent>(100)
     val windowEvents: ReceiveChannel<WindowEvent> = windowEventsChannel
 
-    // 焦点窗口
-    @Volatile var focusedWindowId: Long = -1
+    @Volatile
+    var focusedWindowId: Long = -1
 
-    // 虚拟显示器尺寸（VrWindowRenderer 需要读取，故为 public）
-    var displayWidth: Int = 1920
+    var displayWidth: Int = 1280
         private set
-    var displayHeight: Int = 1080
+    var displayHeight: Int = 720
         private set
 
-    /**
-     * 窗口信息数据类
-     */
     data class WindowInfo(
         val id: Long,
         val packageName: String,
@@ -58,7 +61,10 @@ class WindowManager(private val context: android.content.Context, private val di
         var isMinimized: Boolean = false,
         var isMaximized: Boolean = false,
         var isFocused: Boolean = false,
-        var lastUpdateTime: Long = System.currentTimeMillis()
+        var lastUpdateTime: Long = System.currentTimeMillis(),
+        var displayId: Int = -1,
+        var slotIndex: Int = -1,
+        var isPlaceholder: Boolean = false
     ) : Parcelable {
         constructor(parcel: Parcel) : this(
             id = parcel.readLong(),
@@ -71,7 +77,10 @@ class WindowManager(private val context: android.content.Context, private val di
             isMinimized = parcel.readInt() == 1,
             isMaximized = parcel.readInt() == 1,
             isFocused = parcel.readInt() == 1,
-            lastUpdateTime = parcel.readLong()
+            lastUpdateTime = parcel.readLong(),
+            displayId = parcel.readInt(),
+            slotIndex = parcel.readInt(),
+            isPlaceholder = parcel.readInt() == 1
         )
 
         override fun writeToParcel(dest: Parcel, flags: Int) {
@@ -86,6 +95,9 @@ class WindowManager(private val context: android.content.Context, private val di
             dest.writeInt(if (isMaximized) 1 else 0)
             dest.writeInt(if (isFocused) 1 else 0)
             dest.writeLong(lastUpdateTime)
+            dest.writeInt(displayId)
+            dest.writeInt(slotIndex)
+            dest.writeInt(if (isPlaceholder) 1 else 0)
         }
 
         override fun describeContents(): Int = 0
@@ -99,9 +111,6 @@ class WindowManager(private val context: android.content.Context, private val di
         }
     }
 
-    /**
-     * 窗口事件
-     */
     sealed class WindowEvent {
         data class WindowAdded(val window: WindowInfo) : WindowEvent()
         data class WindowRemoved(val windowId: Long) : WindowEvent()
@@ -116,99 +125,126 @@ class WindowManager(private val context: android.content.Context, private val di
     }
 
     fun setDisplaySize(width: Int, height: Int) {
-        displayWidth = width
-        displayHeight = height
+        displayWidth = width.coerceAtLeast(MIN_WINDOW_WIDTH)
+        displayHeight = height.coerceAtLeast(MIN_WINDOW_HEIGHT)
+    }
+
+    /**
+     * 按虚拟屏列表重建窗口（VR 进入 / 虚拟屏重建时调用）。
+     * 多窗口平铺，保证每个应用窗口都有独立 bounds，可单独移动/缩放。
+     */
+    fun syncFromSlots(list: List<SlotDescriptor>) {
+        clear()
+        val count = list.size.coerceAtLeast(1)
+        val cols = if (count <= 1) 1 else 2
+        val rows = (count + cols - 1) / cols
+        val cellW = (displayWidth / cols).coerceAtLeast(MIN_WINDOW_WIDTH)
+        val cellH = (displayHeight / rows).coerceAtLeast(MIN_WINDOW_HEIGHT)
+
+        list.forEachIndexed { i, descriptor ->
+            val col = i % cols
+            val row = i / cols
+            val left = (col * cellW).coerceAtMost(displayWidth - MIN_WINDOW_WIDTH)
+            val top = (row * cellH).coerceAtMost(displayHeight - MIN_WINDOW_HEIGHT)
+            val right = (left + cellW).coerceAtMost(displayWidth)
+            val bottom = (top + cellH).coerceAtMost(displayHeight)
+            val bounds = Rect(left, top, right.coerceAtLeast(left + MIN_WINDOW_WIDTH), bottom.coerceAtLeast(top + MIN_WINDOW_HEIGHT))
+            addWindow(
+                packageName = descriptor.packageName,
+                activityName = "",
+                title = if (descriptor.title.isEmpty()) "窗口 ${i + 1}" else descriptor.title,
+                initialBounds = bounds,
+                displayId = descriptor.displayId,
+                slotIndex = descriptor.index,
+                isPlaceholder = !descriptor.hasTexture
+            )
+        }
+        Log.d(TAG, "syncFromSlots: ${list.size} slots -> ${windows.size} windows")
     }
 
     fun addWindow(
         packageName: String,
         activityName: String,
         title: String,
-        initialBounds: Rect? = null
+        initialBounds: Rect? = null,
+        displayId: Int = -1,
+        slotIndex: Int = -1,
+        isPlaceholder: Boolean = false
     ): WindowInfo {
         val id = windowIdGenerator.getAndIncrement()
         val bounds = initialBounds ?: calculateDefaultBounds()
-
         val window = WindowInfo(
             id = id,
             packageName = packageName,
             activityName = activityName,
             title = title,
             bounds = bounds,
-            zOrder = windows.size
+            zOrder = windows.size,
+            displayId = displayId,
+            slotIndex = slotIndex,
+            isPlaceholder = isPlaceholder
         )
-
         windows[id] = window
         focusWindow(id)
-
         CoroutineScope(Dispatchers.IO).launch {
             windowEventsChannel.send(WindowEvent.WindowAdded(window))
         }
-
-        Log.d(TAG, "Window added: $title (id=$id, pkg=$packageName, bounds=$bounds)")
+        Log.d(TAG, "Window added: $title (id=$id, pkg=$packageName, slot=$slotIndex, bounds=$bounds)")
         return window
     }
 
     fun removeWindow(windowId: Long): Boolean {
-        val window = windows.remove(windowId)
-        if (window != null) {
-            if (focusedWindowId == windowId) {
-                focusedWindowId = -1
-                val topWindow = windows.values.maxByOrNull { it.zOrder }
-                topWindow?.let { focusWindow(it.id) }
-            }
-
-            CoroutineScope(Dispatchers.IO).launch {
-                windowEventsChannel.send(WindowEvent.WindowClosed(windowId))
-            }
-
-            Log.d(TAG, "Window removed: ${window.title} (id=$windowId)")
-            return true
+        val window = windows.remove(windowId) ?: return false
+        if (focusedWindowId == windowId) {
+            focusedWindowId = -1
+            windows.values.maxByOrNull { it.zOrder }?.let { focusWindow(it.id) }
         }
-        return false
+        CoroutineScope(Dispatchers.IO).launch {
+            windowEventsChannel.send(WindowEvent.WindowClosed(windowId))
+        }
+        return true
     }
 
     fun moveWindow(windowId: Long, newX: Int, newY: Int): Boolean {
         val window = windows[windowId] ?: return false
-
-        val clampedX = newX.coerceIn(0, displayWidth - window.bounds.width())
-        val clampedY = newY.coerceIn(0, displayHeight - window.bounds.height())
-
+        val maxX = (displayWidth - window.bounds.width()).coerceAtLeast(0)
+        val maxY = (displayHeight - window.bounds.height()).coerceAtLeast(0)
+        val clampedX = newX.coerceIn(0, maxX)
+        val clampedY = newY.coerceIn(0, maxY)
         val newBounds = Rect(clampedX, clampedY, clampedX + window.bounds.width(), clampedY + window.bounds.height())
         window.bounds = newBounds
         window.lastUpdateTime = System.currentTimeMillis()
-
         CoroutineScope(Dispatchers.IO).launch {
             windowEventsChannel.send(WindowEvent.WindowMoved(windowId, newBounds))
             windowEventsChannel.send(WindowEvent.WindowUpdated(window))
         }
-
         return true
     }
 
-    fun resizeWindow(windowId: Long, newWidth: Int, newHeight: Int, anchorX: Float = 0.5f, anchorY: Float = 0.5f): Boolean {
+    fun resizeWindow(
+        windowId: Long,
+        newWidth: Int,
+        newHeight: Int,
+        anchorX: Float = 0.5f,
+        anchorY: Float = 0.5f
+    ): Boolean {
         val window = windows[windowId] ?: return false
-
-        val clampedWidth = newWidth.coerceIn(MIN_WINDOW_WIDTH, MAX_WINDOW_WIDTH)
-        val clampedHeight = newHeight.coerceIn(MIN_WINDOW_HEIGHT, MAX_WINDOW_HEIGHT)
-
+        val maxW = MAX_WINDOW_WIDTH.coerceAtMost(displayWidth)
+        val maxH = MAX_WINDOW_HEIGHT.coerceAtMost(displayHeight)
+        val clampedWidth = newWidth.coerceIn(MIN_WINDOW_WIDTH, maxW.coerceAtLeast(MIN_WINDOW_WIDTH))
+        val clampedHeight = newHeight.coerceIn(MIN_WINDOW_HEIGHT, maxH.coerceAtLeast(MIN_WINDOW_HEIGHT))
         val oldBounds = window.bounds
-        // 全部保持 Int：Rect 只接受 Int，Float 会导致类型不匹配编译失败。
         val dx = ((clampedWidth - oldBounds.width()) * anchorX).toInt()
         val dy = ((clampedHeight - oldBounds.height()) * anchorY).toInt()
-
-        val newLeft = (oldBounds.left - dx).coerceIn(0, displayWidth - clampedWidth)
-        val newTop = (oldBounds.top - dy).coerceIn(0, displayHeight - clampedHeight)
-
+        val newLeft = (oldBounds.left - dx).coerceIn(0, (displayWidth - clampedWidth).coerceAtLeast(0))
+        val newTop = (oldBounds.top - dy).coerceIn(0, (displayHeight - clampedHeight).coerceAtLeast(0))
         val newBounds = Rect(newLeft, newTop, newLeft + clampedWidth, newTop + clampedHeight)
         window.bounds = newBounds
         window.lastUpdateTime = System.currentTimeMillis()
-
         CoroutineScope(Dispatchers.IO).launch {
             windowEventsChannel.send(WindowEvent.WindowResized(windowId, newBounds))
             windowEventsChannel.send(WindowEvent.WindowUpdated(window))
         }
-
         return true
     }
 
@@ -216,25 +252,21 @@ class WindowManager(private val context: android.content.Context, private val di
         val window = windows[windowId] ?: return false
         window.zOrder = zOrder
         window.lastUpdateTime = System.currentTimeMillis()
-
         CoroutineScope(Dispatchers.IO).launch {
             windowEventsChannel.send(WindowEvent.WindowUpdated(window))
         }
-
         return true
     }
 
-    /** 将窗口置顶（不自动聚焦，避免递归） */
+    /** 置顶但不递归聚焦（旧版 focusWindow 调用它又回调 focusWindow 会栈溢出）。 */
     fun bringToFront(windowId: Long): Boolean {
         val window = windows[windowId] ?: return false
         val maxZ = windows.values.maxByOrNull { it.zOrder }?.zOrder ?: 0
         window.zOrder = maxZ + 1
         window.lastUpdateTime = System.currentTimeMillis()
-
         CoroutineScope(Dispatchers.IO).launch {
             windowEventsChannel.send(WindowEvent.WindowUpdated(window))
         }
-
         return true
     }
 
@@ -244,7 +276,6 @@ class WindowManager(private val context: android.content.Context, private val di
             window.isMinimized = true
             window.isVisible = false
             window.lastUpdateTime = System.currentTimeMillis()
-
             CoroutineScope(Dispatchers.IO).launch {
                 windowEventsChannel.send(WindowEvent.WindowMinimized(windowId))
                 windowEventsChannel.send(WindowEvent.WindowUpdated(window))
@@ -259,7 +290,6 @@ class WindowManager(private val context: android.content.Context, private val di
             window.isMaximized = true
             window.bounds = Rect(0, 0, displayWidth, displayHeight)
             window.lastUpdateTime = System.currentTimeMillis()
-
             CoroutineScope(Dispatchers.IO).launch {
                 windowEventsChannel.send(WindowEvent.WindowMaximized(windowId))
                 windowEventsChannel.send(WindowEvent.WindowUpdated(window))
@@ -276,7 +306,6 @@ class WindowManager(private val context: android.content.Context, private val di
             window.isVisible = true
             window.bounds = calculateDefaultBounds()
             window.lastUpdateTime = System.currentTimeMillis()
-
             CoroutineScope(Dispatchers.IO).launch {
                 windowEventsChannel.send(WindowEvent.WindowRestored(windowId))
                 windowEventsChannel.send(WindowEvent.WindowUpdated(window))
@@ -285,10 +314,8 @@ class WindowManager(private val context: android.content.Context, private val di
         return true
     }
 
-    /** 设置窗口焦点（聚焦时自动置顶） */
     fun focusWindow(windowId: Long): Boolean {
         val window = windows[windowId] ?: return false
-
         if (focusedWindowId != -1L && focusedWindowId != windowId) {
             windows[focusedWindowId]?.let { prev ->
                 prev.isFocused = false
@@ -297,76 +324,70 @@ class WindowManager(private val context: android.content.Context, private val di
                 }
             }
         }
-
         focusedWindowId = windowId
         window.isFocused = true
         window.isVisible = true
         window.lastUpdateTime = System.currentTimeMillis()
-        bringToFront(windowId)  // 置顶但不再递归调用 focusWindow
-
+        bringToFront(windowId)
         CoroutineScope(Dispatchers.IO).launch {
             windowEventsChannel.send(WindowEvent.WindowFocusChanged(windowId))
             windowEventsChannel.send(WindowEvent.WindowUpdated(window))
         }
-
         return true
     }
 
     fun getWindow(windowId: Long): WindowInfo? = windows[windowId]
-
-    fun getAllWindows(): List<WindowInfo> {
-        return windows.values.toList().sortedByDescending { it.zOrder }
-    }
-
-    fun getVisibleWindows(): List<WindowInfo> {
-        return windows.values.filter { it.isVisible && !it.isMinimized }
-            .sortedByDescending { it.zOrder }
-    }
-
-    fun getFocusedWindow(): WindowInfo? = if (focusedWindowId != -1L) windows[focusedWindowId] else null
-
-    fun findWindowsByPackage(packageName: String): List<WindowInfo> {
-        return windows.values.filter { it.packageName == packageName }
-    }
-
+    fun getAllWindows(): List<WindowInfo> = windows.values.toList().sortedByDescending { it.zOrder }
+    fun getVisibleWindows(): List<WindowInfo> =
+        windows.values.filter { it.isVisible && !it.isMinimized }.sortedBy { it.zOrder }
+    fun getFocusedWindow(): WindowInfo? =
+        if (focusedWindowId != -1L) windows[focusedWindowId] else null
+    fun findWindowsByPackage(packageName: String): List<WindowInfo> =
+        windows.values.filter { it.packageName == packageName }
     fun closeWindow(windowId: Long): Boolean = removeWindow(windowId)
 
+    /** 命中测试：VR 屏幕归一化坐标 (0..1) -> 虚拟屏像素 -> 最上层窗口 */
+    fun hitTest(nx: Float, ny: Float): WindowInfo? {
+        val px = (nx * displayWidth).toInt()
+        val py = (ny * displayHeight).toInt()
+        return getVisibleWindows().lastOrNull { it.bounds.contains(px, py) }
+            ?: getFocusedWindow()
+    }
+
     private fun calculateDefaultBounds(): Rect {
+        val w = DEFAULT_WINDOW_WIDTH.coerceAtMost(displayWidth)
+        val h = DEFAULT_WINDOW_HEIGHT.coerceAtMost(displayHeight)
         val offset = (windows.size * 30) % 200
-        val left = ((displayWidth - DEFAULT_WINDOW_WIDTH) / 2 + offset).coerceIn(0, displayWidth - DEFAULT_WINDOW_WIDTH)
-        val top = ((displayHeight - DEFAULT_WINDOW_HEIGHT) / 2 + offset).coerceIn(0, displayHeight - DEFAULT_WINDOW_HEIGHT)
-        return Rect(left, top, left + DEFAULT_WINDOW_WIDTH, top + DEFAULT_WINDOW_HEIGHT)
+        val left = ((displayWidth - w) / 2 + offset).coerceIn(0, (displayWidth - w).coerceAtLeast(0))
+        val top = ((displayHeight - h) / 2 + offset).coerceIn(0, (displayHeight - h).coerceAtLeast(0))
+        return Rect(left, top, left + w, top + h)
     }
 
     fun onDisplayResized(newWidth: Int, newHeight: Int) {
         val oldWidth = displayWidth
         val oldHeight = displayHeight
-        displayWidth = newWidth
-        displayHeight = newHeight
-
-        val scaleX = newWidth.toFloat() / oldWidth
-        val scaleY = newHeight.toFloat() / oldHeight
-
+        displayWidth = newWidth.coerceAtLeast(MIN_WINDOW_WIDTH)
+        displayHeight = newHeight.coerceAtLeast(MIN_WINDOW_HEIGHT)
+        val scaleX = displayWidth.toFloat() / oldWidth.coerceAtLeast(1)
+        val scaleY = displayHeight.toFloat() / oldHeight.coerceAtLeast(1)
         windows.values.forEach { window ->
-            if (!window.isMaximized) {
-                val newBounds = Rect(
+            window.bounds = if (window.isMaximized) {
+                Rect(0, 0, displayWidth, displayHeight)
+            } else {
+                val b = Rect(
                     (window.bounds.left * scaleX).toInt(),
                     (window.bounds.top * scaleY).toInt(),
                     (window.bounds.right * scaleX).toInt(),
                     (window.bounds.bottom * scaleY).toInt()
                 )
-                val clampedBounds = Rect(
-                    newBounds.left.coerceIn(0, newWidth - MIN_WINDOW_WIDTH),
-                    newBounds.top.coerceIn(0, newHeight - MIN_WINDOW_HEIGHT),
-                    newBounds.right.coerceIn(MIN_WINDOW_WIDTH, newWidth),
-                    newBounds.bottom.coerceIn(MIN_WINDOW_HEIGHT, newHeight)
+                Rect(
+                    b.left.coerceIn(0, displayWidth - MIN_WINDOW_WIDTH),
+                    b.top.coerceIn(0, displayHeight - MIN_WINDOW_HEIGHT),
+                    b.right.coerceIn(MIN_WINDOW_WIDTH, displayWidth),
+                    b.bottom.coerceIn(MIN_WINDOW_HEIGHT, displayHeight)
                 )
-                window.bounds = clampedBounds
-            } else {
-                window.bounds = Rect(0, 0, newWidth, newHeight)
             }
             window.lastUpdateTime = System.currentTimeMillis()
-
             CoroutineScope(Dispatchers.IO).launch {
                 windowEventsChannel.send(WindowEvent.WindowUpdated(window))
             }
@@ -374,11 +395,6 @@ class WindowManager(private val context: android.content.Context, private val di
     }
 
     fun clear() {
-        windows.keys.forEach { id ->
-            CoroutineScope(Dispatchers.IO).launch {
-                windowEventsChannel.send(WindowEvent.WindowClosed(id))
-            }
-        }
         windows.clear()
         focusedWindowId = -1
     }

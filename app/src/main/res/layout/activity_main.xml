@@ -1,158 +1,131 @@
 <?xml version="1.0" encoding="utf-8"?>
-<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:orientation="vertical"
-    android:padding="16dp"
     android:background="#1a1a1a"
-    android:gravity="center">
+    android:fillViewport="true">
 
-    <!-- 标题 -->
-    <TextView
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:text="VR 2D App Launcher"
-        android:textSize="28sp"
-        android:textColor="#ffffff"
-        android:textStyle="bold"
-        android:layout_marginBottom="8dp" />
-
-    <TextView
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:text="Shizuku 虚拟显示器演示"
-        android:textSize="16sp"
-        android:textColor="#aaaaaa"
-        android:layout_marginBottom="24dp" />
-
-    <!-- Shizuku 状态 -->
-    <TextView
-        android:id="@+id/tv_shizuku_status"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:text="检查 Shizuku 权限中..."
-        android:textSize="14sp"
-        android:textColor="#88cc88"
-        android:gravity="center"
-        android:layout_marginBottom="16dp"
-        android:padding="12dp"
-        android:background="#2a2a2a"
-        android:layout_marginHorizontal="0dp" />
-
-    <!-- 虚拟显示器状态 -->
-    <TextView
-        android:id="@+id/tv_vd_status"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:text="虚拟显示器: 未创建"
-        android:textSize="14sp"
-        android:textColor="#ffaa00"
-        android:gravity="center"
-        android:layout_marginBottom="24dp"
-        android:padding="12dp"
-        android:background="#2a2a2a" />
-
-    <!-- 应用启动按钮 -->
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:orientation="vertical"
-        android:gravity="center"
-        android:layout_marginBottom="16dp">
+        android:padding="16dp">
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="VR 2D App Launcher"
+            android:textSize="26sp"
+            android:textColor="#ffffff"
+            android:textStyle="bold"
+            android:layout_marginBottom="4dp" />
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="多块独立虚拟屏 · 每屏一个应用 · VR 里各自一个窗口"
+            android:textSize="13sp"
+            android:textColor="#aaaaaa"
+            android:layout_marginBottom="16dp" />
+
+        <TextView
+            android:id="@+id/tv_shizuku_status"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="检查 Shizuku 权限中..."
+            android:textSize="13sp"
+            android:textColor="#88cc88"
+            android:padding="12dp"
+            android:background="#2a2a2a"
+            android:layout_marginBottom="8dp" />
+
+        <TextView
+            android:id="@+id/tv_vd_status"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="屏幕捕获: 未授权"
+            android:textSize="13sp"
+            android:textColor="#ffaa00"
+            android:padding="12dp"
+            android:background="#2a2a2a"
+            android:layout_marginBottom="8dp" />
+
+        <TextView
+            android:id="@+id/tv_plan"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="已选应用：0/4"
+            android:textSize="13sp"
+            android:textColor="#dddddd"
+            android:padding="12dp"
+            android:background="#2a2a2a"
+            android:layout_marginBottom="16dp" />
 
         <Button
-            android:id="@+id/btn_chrome"
-            android:layout_width="280dp"
-            android:layout_height="56dp"
-            android:text="启动 Chrome (VR)"
-            android:textSize="16sp"
-            android:backgroundTint="#1a73e8"
-            android:layout_marginBottom="12dp" />
-
-        <Button
-            android:id="@+id/btn_youtube"
-            android:layout_width="280dp"
-            android:layout_height="56dp"
-            android:text="启动 YouTube (VR)"
-            android:textSize="16sp"
-            android:backgroundTint="#ff0000"
-            android:layout_marginBottom="12dp" />
-
-        <Button
-            android:id="@+id/btn_browser"
-            android:layout_width="280dp"
-            android:layout_height="56dp"
-            android:text="启动 浏览器 (VR)"
-            android:textSize="16sp"
-            android:backgroundTint="#4caf50"
-            android:layout_marginBottom="12dp" />
-
-        <Button
-            android:id="@+id/btn_custom"
-            android:layout_width="280dp"
-            android:layout_height="56dp"
-            android:text="启动自定义包名 (VR)"
-            android:textSize="16sp"
-            android:backgroundTint="#ff9800"
-            android:layout_marginBottom="24dp" />
-    </LinearLayout>
-
-    <!-- 控制按钮 -->
-    <LinearLayout
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:orientation="horizontal"
-        android:gravity="center"
-        android:layout_marginBottom="16dp">
-
-        <Button
-            android:id="@+id/btn_create_vd"
-            android:layout_width="140dp"
+            android:id="@+id/btn_authorize"
+            android:layout_width="match_parent"
             android:layout_height="48dp"
-            android:text="创建虚拟显示器"
-            android:textSize="14sp"
+            android:text="1. 授权屏幕捕获（创建虚拟屏）"
+            android:textSize="15sp"
             android:backgroundTint="#2196f3"
-            android:layout_marginEnd="8dp" />
+            android:layout_marginBottom="8dp" />
 
         <Button
-            android:id="@+id/btn_destroy_vd"
-            android:layout_width="140dp"
+            android:id="@+id/btn_app_list"
+            android:layout_width="match_parent"
             android:layout_height="48dp"
-            android:text="销毁虚拟显示器"
+            android:text="2. 选择应用（读取已安装应用列表）"
+            android:textSize="15sp"
+            android:backgroundTint="#4caf50"
+            android:layout_marginBottom="8dp" />
+
+        <Button
+            android:id="@+id/btn_enter_vr"
+            android:layout_width="match_parent"
+            android:layout_height="64dp"
+            android:text="▶ 一键进入 VR 模式"
+            android:textSize="18sp"
+            android:textStyle="bold"
+            android:backgroundTint="#9c27b0"
+            android:layout_marginBottom="8dp" />
+
+        <Switch
+            android:id="@+id/switch_auto_vr"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="启动即进入 VR 模式（跳过 2D 界面）"
             android:textSize="14sp"
-            android:backgroundTint="#f44336"
-            android:layout_marginStart="8dp" />
+            android:textColor="#ffffff"
+            android:padding="12dp"
+            android:background="#2a2a2a"
+            android:layout_marginBottom="8dp" />
+
+        <Button
+            android:id="@+id/btn_vr_settings"
+            android:layout_width="match_parent"
+            android:layout_height="48dp"
+            android:text="VR 设置（分辨率 / DPI 可写数值）"
+            android:textSize="15sp"
+            android:backgroundTint="#607d8b"
+            android:layout_marginBottom="8dp" />
+
+        <Button
+            android:id="@+id/btn_export_diag"
+            android:layout_width="match_parent"
+            android:layout_height="48dp"
+            android:text="导出诊断日志（闪退时点这个）"
+            android:textSize="15sp"
+            android:backgroundTint="#ff9800"
+            android:layout_marginBottom="16dp" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="使用说明：\n1. 授权屏幕捕获（无需 root）；进入 VR 时才在 GL 线程逐块创建独立虚拟屏，不会镜像主屏。\n2. 在「选择应用」里勾选最多 4 个应用；每个应用一块独立虚拟屏、VR 里一个窗口。\n3. 点「一键进入 VR」把手机放入 Cardboard。没授权会自动先弹授权。\n4. 想开机直接进 VR，打开「启动即进入 VR 模式」开关。\n5. 建议安装并激活 Shizuku 并授权：没有它，第三方应用无法被可靠地启动到独立虚拟屏（系统会拦截）。\n6. 分辨率 / DPI / 刷新率在设置里可直接输入数值；改完需重新进入 VR 才会重建虚拟屏。\n7. 若闪退，点「导出诊断日志」，可直接查看并复制，无需 adb logcat。"
+            android:textSize="12sp"
+            android:textColor="#888888"
+            android:lineSpacingMultiplier="1.35"
+            android:padding="8dp" />
+
     </LinearLayout>
-
-    <!-- 进入 VR 模式 -->
-    <Button
-        android:id="@+id/btn_enter_vr"
-        android:layout_width="280dp"
-        android:layout_height="56dp"
-        android:text="进入 VR 模式 (放入 Cardboard)"
-        android:textSize="16sp"
-        android:textStyle="bold"
-        android:backgroundTint="#9c27b0"
-        android:layout_marginBottom="16dp" />
-
-    <!-- VR 设置 -->
-    <Button
-        android:id="@+id/btn_vr_settings"
-        android:layout_width="280dp"
-        android:layout_height="48dp"
-        android:text="VR 设置 (画面/几何/舒适度)"
-        android:textSize="14sp"
-        android:backgroundTint="#607d8b"
-        android:layout_marginBottom="24dp" />
-
-    <!-- 说明文字 -->
-    <TextView
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:text="使用说明:\n1. 点击'创建虚拟显示器'并同意系统屏幕捕获授权（无需 root）\n2. 点击应用按钮在虚拟显示器上启动应用\n3. 点击'进入 VR 模式'放入 Cardboard 观看\n4. 安装并激活 Shizuku 可获得指定 display 启动 / 输入注入等增强能力（可选）\n5. 虚拟屏分辨率、DPI 与画面参数在'VR 设置'中调整（改分辨率需销毁后重建）"
-        android:textSize="12sp"
-        android:textColor="#888888"
-        android:lineSpacingMultiplier="1.3"
-        android:padding="8dp" />
-
-</LinearLayout>
+</ScrollView>

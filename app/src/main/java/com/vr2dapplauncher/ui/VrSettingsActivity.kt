@@ -11,9 +11,12 @@ import android.view.View
 import android.view.ViewGroup
 import android.widget.AdapterView
 import android.widget.ArrayAdapter
+import android.widget.Button
+import android.widget.EditText
 import android.widget.SeekBar
 import android.widget.Spinner
 import android.widget.TextView
+import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
@@ -107,6 +110,15 @@ class VrSettingsActivity : AppCompatActivity() {
             val title: String,
             val summary: String,
             val entries: List<String>,
+            val getValue: () -> Int,
+            val onChanged: (Int) -> Unit
+        ) : SettingItem()
+        /** 离散量改用可直接写入数值的输入框（分辨率 / DPI / 刷新率）。 */
+        data class NumberItem(
+            val title: String,
+            val summary: String,
+            val min: Int,
+            val max: Int,
             val getValue: () -> Int,
             val onChanged: (Int) -> Unit
         ) : SettingItem()
@@ -234,25 +246,25 @@ class VrSettingsActivity : AppCompatActivity() {
                 // --- 虚拟显示器配置 ---
                 SettingItem.Header("虚拟显示器配置 (需重建虚拟显示器生效)"),
 
-                SettingItem.SeekBarItem(
+                SettingItem.NumberItem(
                     "宽度", "虚拟显示器宽度 (像素)",
                     720, 3840,
                     { settings.virtualDisplayWidth },
                     { settings.virtualDisplayWidth = it }
                 ),
-                SettingItem.SeekBarItem(
+                SettingItem.NumberItem(
                     "高度", "虚拟显示器高度 (像素)",
                     480, 2160,
                     { settings.virtualDisplayHeight },
                     { settings.virtualDisplayHeight = it }
                 ),
-                SettingItem.SeekBarItem(
+                SettingItem.NumberItem(
                     "DPI", "虚拟显示器像素密度",
                     120, 640,
                     { settings.virtualDisplayDpi },
                     { settings.virtualDisplayDpi = it }
                 ),
-                SettingItem.SeekBarItem(
+                SettingItem.NumberItem(
                     "刷新率", "虚拟显示器刷新率 (Hz)",
                     30, 120,
                     { settings.virtualDisplayRefreshRate },
@@ -267,6 +279,7 @@ class VrSettingsActivity : AppCompatActivity() {
                 is SettingItem.SeekBarItem -> 1
                 is SettingItem.FloatSeekBarItem -> 2
                 is SettingItem.SpinnerItem -> 3
+                is SettingItem.NumberItem -> 4
             }
         }
 
@@ -276,6 +289,7 @@ class VrSettingsActivity : AppCompatActivity() {
                 1 -> SeekBarViewHolder(LayoutInflater.from(context).inflate(R.layout.item_settings_seekbar, parent, false))
                 2 -> FloatSeekBarViewHolder(LayoutInflater.from(context).inflate(R.layout.item_settings_seekbar, parent, false))
                 3 -> SpinnerViewHolder(LayoutInflater.from(context).inflate(R.layout.item_settings_spinner, parent, false))
+                4 -> NumberViewHolder(LayoutInflater.from(context).inflate(R.layout.item_settings_number, parent, false))
                 else -> throw IllegalArgumentException("Unknown view type: $viewType")
             }
         }
@@ -287,6 +301,7 @@ class VrSettingsActivity : AppCompatActivity() {
                 is SeekBarViewHolder -> holder.bind(item as SettingItem.SeekBarItem)
                 is FloatSeekBarViewHolder -> holder.bind(item as SettingItem.FloatSeekBarItem)
                 is SpinnerViewHolder -> holder.bind(item as SettingItem.SpinnerItem)
+                is NumberViewHolder -> holder.bind(item as SettingItem.NumberItem)
             }
         }
 
@@ -378,6 +393,32 @@ class VrSettingsActivity : AppCompatActivity() {
                         item.onChanged(position)
                     }
                     override fun onNothingSelected(parent: AdapterView<*>?) {}
+                }
+            }
+        }
+
+        /** 数值输入：直接写数字 + 「应用」按钮，避免滑块只能按步进调。 */
+        inner class NumberViewHolder(view: View) : RecyclerView.ViewHolder(view) {
+            private val tvTitle: TextView = view.findViewById(R.id.tv_setting_title)
+            private val tvSummary: TextView = view.findViewById(R.id.tv_setting_summary)
+            private val editText: EditText = view.findViewById(R.id.et_setting_value)
+            private val btnApply: Button = view.findViewById(R.id.btn_apply)
+
+            fun bind(item: SettingItem.NumberItem) {
+                tvTitle.text = item.title
+                tvSummary.text = "${item.summary}（可输入 ${item.min}~${item.max}，重建虚拟屏后生效）"
+                editText.setText(item.getValue().toString())
+                btnApply.setOnClickListener {
+                    val parsed = editText.text.toString().trim().toIntOrNull()
+                    if (parsed == null) {
+                        Toast.makeText(context, "请输入数字", Toast.LENGTH_SHORT).show()
+                        editText.setText(item.getValue().toString())
+                    } else {
+                        val clamped = parsed.coerceIn(item.min, item.max)
+                        item.onChanged(clamped)
+                        editText.setText(clamped.toString())
+                        Toast.makeText(context, "已保存 $clamped（重建虚拟屏后生效）", Toast.LENGTH_SHORT).show()
+                    }
                 }
             }
         }

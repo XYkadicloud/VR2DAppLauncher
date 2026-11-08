@@ -120,6 +120,103 @@ jobs:
           distribution: temurin
           java-version: '17'
 
+      # 一次性全量静态自检：在花钱跑 Gradle 之前就把「旧 API 残留 / 缺文件 /
+      # shader 首行 / Manifest 缺声明 / 主屏镜像回归」拦下来。
+      - name: Pre-build static audit (catch stale API / missing files before Gradle)
+        run: |
+          python3 - <<'PY'
+          import os, sys
+          src = "VR2DAppLauncher/app/src/main"
+          errors = []
+
+          kt = [
+              "java/com/vr2dapplauncher/VR2DApp.kt",
+              "java/com/vr2dapplauncher/util/Diagnostics.kt",
+              "java/com/vr2dapplauncher/ui/MainActivity.kt",
+              "java/com/vr2dapplauncher/ui/AppListActivity.kt",
+              "java/com/vr2dapplauncher/ui/VrSettingsActivity.kt",
+              "java/com/vr2dapplauncher/vr/VrActivity.kt",
+              "java/com/vr2dapplauncher/vr/VrWindowRenderer.kt",
+              "java/com/vr2dapplauncher/vr/WindowManager.kt",
+              "java/com/vr2dapplauncher/vr/VrSettings.kt",
+              "java/com/vr2dapplauncher/shizuku/VrVirtualDisplayHost.kt",
+              "java/com/vr2dapplauncher/shizuku/VirtualDisplayManager.kt",
+              "java/com/vr2dapplauncher/shizuku/AppLauncher.kt",
+              "java/com/vr2dapplauncher/shizuku/ProjectionHolder.kt",
+              "java/com/vr2dapplauncher/shizuku/ProjectionService.kt",
+              "java/com/vr2dapplauncher/shizuku/LaunchPlan.kt",
+              "java/com/vr2dapplauncher/shizuku/ShizukuUtils.kt",
+              "java/com/vr2dapplauncher/shizuku/ShizukuServiceUtils.kt",
+              "java/com/vr2dapplauncher/shizuku/InputRouter.kt",
+              "java/com/vr2dapplauncher/shizuku/AudioRouter.kt",
+          ]
+          for rel in kt:
+              if not os.path.isfile(os.path.join(src, rel)):
+                  errors.append("missing Kotlin file: " + rel)
+
+          xml = [
+              "res/layout/activity_main.xml",
+              "res/layout/activity_app_list.xml",
+              "res/layout/item_app.xml",
+              "res/layout/activity_vr.xml",
+              "res/layout/activity_vr_settings.xml",
+              "res/layout/item_settings_number.xml",
+              "res/layout/item_settings_seekbar.xml",
+              "res/layout/item_settings_header.xml",
+              "res/layout/item_settings_spinner.xml",
+              "AndroidManifest.xml",
+          ]
+          for rel in xml:
+              if not os.path.isfile(os.path.join(src, rel)):
+                  errors.append("missing XML file: " + rel)
+
+          # 多虚拟屏重构后已删除的旧接口，任何残留都会让 Kotlin 编译失败。
+          stale = [
+              "createGlTextureOnGlThread", "onGlThreadReady",
+              "getSurfaceTexture(", ".glTextureId", "getDisplayArgs(",
+              ".isRunning", "VrVirtualDisplayHost(this, mediaProjection",
+          ]
+          jdir = os.path.join(src, "java")
+          for dirpath, _, files in os.walk(jdir):
+              for f in files:
+                  if not f.endswith(".kt"):
+                      continue
+                  p = os.path.join(dirpath, f)
+                  t = open(p, encoding="utf-8").read()
+                  for s in stale:
+                      if s in t:
+                          errors.append("stale API %r in %s" % (s, p))
+
+          vr = os.path.join(src, "java/com/vr2dapplauncher/vr/VrRenderer.kt")
+          if os.path.isfile(vr):
+              errors.append("VrRenderer.kt still present (references removed host API)")
+
+          rpath = os.path.join(src, "java/com/vr2dapplauncher/vr/VrWindowRenderer.kt")
+          if os.path.isfile(rpath):
+              t = open(rpath, encoding="utf-8").read()
+              if '"""#extension GL_OES_EGL_image_external : require' not in t:
+                  errors.append("VrWindowRenderer fragment shader missing first-line #extension")
+
+          vdm = os.path.join(src, "java/com/vr2dapplauncher/shizuku/VirtualDisplayManager.kt")
+          if os.path.isfile(vdm):
+              t = open(vdm, encoding="utf-8").read()
+              if "VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR" in t:
+                  errors.append("AUTO_MIRROR is back - main screen is the VR UI")
+              if "VIRTUAL_DISPLAY_FLAG_OWN_CONTENT_ONLY" not in t:
+                  errors.append("OWN_CONTENT_ONLY missing - displays would mirror the VR UI")
+
+          mani = open(os.path.join(src, "AndroidManifest.xml"), encoding="utf-8").read()
+          for token in ["AppListActivity", "ProjectionService", "<queries>", "POST_NOTIFICATIONS"]:
+              if token not in mani:
+                  errors.append("AndroidManifest.xml missing " + token)
+
+          if errors:
+              for e in errors:
+                  print("::error::" + e)
+              sys.exit(1)
+          print("Static audit OK: %d Kotlin files, %d XML files checked" % (len(kt), len(xml)))
+          PY
+
       - name: Build Debug APK
         working-directory: VR2DAppLauncher
         run: |
@@ -150,7 +247,12 @@ jobs:
           }
           echo "--- compiled Kotlin classes check ---"
           find VR2DAppLauncher/app/build/tmp/kotlin-classes -name "*.class" | head -10
-          echo "Kotlin class files: $(find VR2DAppLauncher/app/build/tmp/kotlin-classes -name '*.class' | wc -l)"
+          COUNT=$(find VR2DAppLauncher/app/build/tmp/kotlin-classes -name '*.class' | wc -l)
+          echo "Kotlin class files: $COUNT"
+          if [ "$COUNT" -lt 20 ]; then
+            echo "::error::Too few compiled Kotlin classes ($COUNT); app sources were probably not compiled"
+            exit 1
+          fi
 
       - name: Upload Debug APK
         uses: actions/upload-artifact@v4

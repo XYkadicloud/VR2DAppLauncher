@@ -5,63 +5,73 @@ import android.hardware.display.VirtualDisplay
 import android.media.projection.MediaProjection
 import android.util.Log
 import android.view.Surface
+import com.vr2dapplauncher.util.Diagnostics
 
 /**
- * 虚拟显示器创建。
+ * 独立虚拟显示器创建（★ 本版架构核心）。
  *
- * 技术验证阶段刻意只用 **公开 Android API**：
- *   MediaProjection.createVirtualDisplay(name, w, h, dpi, flags, surface, cb, handler)
- * 这样无需 root、无需 framework hidden API、无需反射，标准 SDK 一定能编译，
- * 且用户授权后能真正把 2D 应用画面投到虚拟屏幕。
+ * 为什么不能用 AUTO_MIRROR 镜像主屏：
+ *   进入 VR 模式后，物理主屏被全屏 CardboardView 占满，主屏显示的就是 VR 界面本身。
+ *   镜像主屏 = 把 VR 界面投回虚拟屏 = 看不到任何第三方应用，且形成自我镜像。
+ *   因此每个虚拟屏必须是 OWN_CONTENT_ONLY 的独立内容屏，第三方应用通过
+ *   `am start --display <displayId>`（需要 Shizuku/shell 权限）显式启动到该屏。
  *
- * 屏连/屏易连的 Shizuku 路径（IDisplayManager + VirtualDisplayConfig.Builder）
- * 依赖隐藏接口，留待后续用 ShizukuBinderWrapper + AIDL transact 补齐；
- * 本项目其余部分（系统服务、输入注入、指定 display 启动应用）仍在使用 Shizuku。
+ * flags 说明：
+ *   - VIRTUAL_DISPLAY_FLAG_PUBLIC：系统可见、可作为启动目标
+ *   - VIRTUAL_DISPLAY_FLAG_OWN_CONTENT_ONLY：只显示放到本屏的内容，不镜像主屏
+ *   - 不使用 AUTO_MIRROR（镜像主屏，错误）
+ *   - 不使用 PRESENTATION（与 OWN_CONTENT_ONLY 语义冲突，部分 ROM 会拒绝创建）
  */
 object VirtualDisplayManager {
+
     private const val TAG = "VirtualDisplayManager"
 
     data class VirtualDisplayArgs(
-        val name: String = "VR2DAppLauncher-Display",
-        val width: Int = 1920,
-        val height: Int = 1080,
-        val dpi: Int = 320,
-        val refreshRate: Int = 60,
-        val rotatesWithContent: Boolean = false
+        val name: String = "VR2D-Display",
+        val width: Int = 1280,
+        val height: Int = 720,
+        val dpi: Int = 320
     )
 
+    /**
+     * 创建一块虚拟屏。任何失败都返回 null 并记录原因，绝不向外抛异常。
+     *
+     * 注意：Android 14 起一次 MediaProjection 授权只允许 createVirtualDisplay 一次。
+     * 多次调用由 VrVirtualDisplayHost 逐个捕获，失败时降级为复用第一块屏，
+     * 不会造成闪退或全黑。
+     */
     fun createVirtualDisplay(
         args: VirtualDisplayArgs,
         surface: Surface,
-        mediaProjection: MediaProjection? = null
-    ): VirtualDisplay? {
-        val projection = mediaProjection ?: run {
-            Log.w(TAG, "MediaProjection is null; user consent is required before creating a display")
-            return null
-        }
-        return try {
-            val flags = DisplayManager.VIRTUAL_DISPLAY_FLAG_PUBLIC or
-                    DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR or
-                    DisplayManager.VIRTUAL_DISPLAY_FLAG_PRESENTATION
-            val vd = projection.createVirtualDisplay(
-                args.name,
-                args.width,
-                args.height,
-                args.dpi,
-                flags,
-                surface,
-                null,
-                null
-            )
-            if (vd != null) {
-                Log.d(TAG, "VirtualDisplay created: ${args.width}x${args.height}@${args.dpi}dpi")
-            } else {
-                Log.w(TAG, "createVirtualDisplay returned null")
-            }
-            vd
-        } catch (e: Exception) {
-            Log.e(TAG, "createVirtualDisplay failed", e)
+        mediaProjection: MediaProjection,
+        index: Int
+    ): VirtualDisplay? = try {
+        val flags = DisplayManager.VIRTUAL_DISPLAY_FLAG_PUBLIC or
+                DisplayManager.VIRTUAL_DISPLAY_FLAG_OWN_CONTENT_ONLY
+        val display = mediaProjection.createVirtualDisplay(
+            "${args.name}-$index",
+            args.width,
+            args.height,
+            args.dpi,
+            flags,
+            surface,
+            null,
             null
+        )
+        if (display == null) {
+            val msg = "createVirtualDisplay[$index] returned null (consent invalid or system refused)"
+            Log.w(TAG, msg)
+            Diagnostics.record(TAG, msg)
+        } else {
+            val msg = "VirtualDisplay[$index] OK: ${args.width}x${args.height}@${args.dpi}dpi"
+            Log.d(TAG, msg)
+            Diagnostics.record(TAG, msg)
         }
+        display
+    } catch (e: Exception) {
+        val msg = "createVirtualDisplay[$index] threw ${e.javaClass.simpleName}: ${e.message}"
+        Log.e(TAG, msg, e)
+        Diagnostics.record(TAG, msg)
+        null
     }
 }

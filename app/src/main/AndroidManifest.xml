@@ -3,20 +3,27 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
 
-    <!-- 权限（MediaProjection 走 createScreenCaptureIntent 用户授权，不需要声明签名权限） -->
+    <!-- 权限（必须是 manifest 直接子节点） -->
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
-    <!-- Shizuku 权限声明（必须在 manifest 直接子节点） -->
+    <!-- Shizuku：把第三方应用启动到虚拟屏 / 注入输入需要 shell 权限 -->
     <uses-permission android:name="moe.shizuku.manager.permission.API_V23" />
     <uses-permission android:name="moe.shizuku.manager.permission.API_V11" />
+
+    <!-- Android 11+ 包可见性：不声明则 queryIntentActivities 读不到第三方应用 -->
+    <queries>
+        <intent>
+            <action android:name="android.intent.action.MAIN" />
+            <category android:name="android.intent.category.LAUNCHER" />
+        </intent>
+    </queries>
 
     <!-- VR 相关 -->
     <uses-feature android:name="android.hardware.vr.high_performance" android:required="false" />
     <uses-feature android:name="android.hardware.vr.headtracking" android:required="false" />
-
-    <!-- USB/外部输入设备 -->
     <uses-feature android:name="android.hardware.usb.host" android:required="false" />
 
     <application
@@ -39,7 +46,13 @@
             android:multiprocess="false"
             android:permission="android.permission.INTERACT_ACROSS_USERS_FULL" />
 
-        <!-- 主 Activity：2D 启动器界面 -->
+        <!-- 前台服务：Android 10+ 起 MediaProjection 必须在前台服务上下文中运行 -->
+        <service
+            android:name=".shizuku.ProjectionService"
+            android:exported="false"
+            android:foregroundServiceType="mediaProjection" />
+
+        <!-- 主 Activity：2D 管理界面 -->
         <activity
             android:name=".ui.MainActivity"
             android:exported="true"
@@ -52,7 +65,7 @@
             </intent-filter>
         </activity>
 
-        <!-- VR Activity：Cardboard VR 观看模式 -->
+        <!-- VR Activity：全屏 CardboardView -->
         <activity
             android:name=".vr.VrActivity"
             android:exported="false"
@@ -61,9 +74,17 @@
             android:screenOrientation="landscape"
             android:configChanges="orientation|screenSize|keyboardHidden" />
 
-        <!-- VR 设置 Activity -->
+        <!-- VR 设置 -->
         <activity
             android:name=".ui.VrSettingsActivity"
+            android:exported="false"
+            android:launchMode="singleTop"
+            android:theme="@style/Theme.VR2DAppLauncher.NoActionBar"
+            android:windowSoftInputMode="adjustResize" />
+
+        <!-- 已安装应用列表 -->
+        <activity
+            android:name=".ui.AppListActivity"
             android:exported="false"
             android:launchMode="singleTop"
             android:theme="@style/Theme.VR2DAppLauncher.NoActionBar"

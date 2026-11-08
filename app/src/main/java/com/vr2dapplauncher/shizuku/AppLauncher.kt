@@ -1,65 +1,72 @@
 package com.vr2dapplauncher.shizuku
 
 import android.app.ActivityOptions
+import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.util.Log
-import android.widget.Toast
+import com.vr2dapplauncher.util.Diagnostics
 
 /**
- * 在虚拟显示器上启动应用。
+ * 把第三方应用启动到指定虚拟屏。
  *
- * 公开 API 路径：ActivityOptions.setLaunchDisplayId(displayId) + startActivity。
- * Shizuku 增强路径：有权限时用 `am start --display <id> -n <component>` 由 shell 侧再尝试。
- * 不再使用 Refine / IActivityManager / setLaunchWindowingMode（均为隐藏 API，编译不过）。
+ * 主路径（需要 Shizuku）：shell 身份执行 `am start --display <id> -n <component>`。
+ *   普通应用调用 ActivityOptions.setLaunchDisplayId() 启动别的包到 secondary display
+ *   会被 framework 的 isCallerAllowedToLaunchOnDisplay() 拒绝（需要 ADD_TRUSTED_DISPLAY），
+ *   因此只有 shell/root 身份可靠。这也是「屏连 / 屏易连」的做法。
+ *
+ * 兜底路径（无 Shizuku）：公开 API 尽力尝试；失败只记录、不抛异常。
+ *   此时用户仍能在 VR 里看到窗口、调整窗口，但窗口内不会有第三方应用内容。
  */
 class AppLauncher(private val context: Context) {
+
     companion object {
         private const val TAG = "AppLauncher"
-        private const val FLAG_ACTIVITY_NEW_TASK = 0x10000000
     }
 
-    fun launchPackage(packageName: String, displayId: Int) {
-        val displayManager =
-            context.getSystemService(Context.DISPLAY_SERVICE) as android.hardware.display.DisplayManager
-        if (displayManager.getDisplay(displayId) == null) {
-            Log.w(TAG, "Display $displayId not found")
-            Toast.makeText(context, "虚拟显示器 $displayId 不存在", Toast.LENGTH_SHORT).show()
-            return
-        }
+    /** @return 是否成功发起启动 */
+    fun launchPackage(component: String, displayId: Int): Boolean {
+        if (displayId < 0 || component.isEmpty()) return false
 
-        launchNormally(packageName, displayId)
         if (ShizukuUtils.hasPermission()) {
-            launchWithShizuku(packageName, displayId)
+            val output = ShizukuUtils.runShell(
+                arrayOf("am", "start", "--display", displayId.toString(), "-n", component)
+            )
+            val ok = output != null && !output.contains("Error", ignoreCase = true)
+            val msg = "am start --display $displayId -n $component -> ok=$ok out=${output?.take(180)}"
+            Log.d(TAG, msg)
+            Diagnostics.record(TAG, msg)
+            if (ok) return true
+        } else {
+            val msg = "Shizuku not granted: cannot launch $component on display $displayId"
+            Log.w(TAG, msg)
+            Diagnostics.record(TAG, msg)
         }
-        InputRouter.bindAllExternalInputToDisplay(displayId)
+
+        return launchNormally(component, displayId)
     }
 
-    private fun launchNormally(packageName: String, displayId: Int) {
-        val intent: Intent = context.packageManager.getLaunchIntentForPackage(packageName)
-            ?.apply { addFlags(FLAG_ACTIVITY_NEW_TASK) }
-            ?: run {
-                Toast.makeText(context, "找不到应用: $packageName", Toast.LENGTH_SHORT).show()
-                return
+    private fun launchNormally(component: String, displayId: Int): Boolean = try {
+        val cn = ComponentName.unflattenFromString(component)
+        if (cn == null) {
+            Diagnostics.record(TAG, "bad component string: $component")
+            false
+        } else {
+            val intent = Intent(Intent.ACTION_MAIN).apply {
+                this.component = cn
+                addCategory(Intent.CATEGORY_LAUNCHER)
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             }
-        try {
-            val options = ActivityOptions.makeBasic().apply {
-                setLaunchDisplayId(displayId)
-            }
+            val options = ActivityOptions.makeBasic()
+            options.setLaunchDisplayId(displayId)
             context.startActivity(intent, options.toBundle())
-            Log.d(TAG, "Launched $packageName on display $displayId")
-        } catch (e: Exception) {
-            Log.e(TAG, "startActivity on display $displayId failed", e)
-            Toast.makeText(context, "启动失败: ${e.message}", Toast.LENGTH_SHORT).show()
+            Diagnostics.record(TAG, "startActivity fallback launched $component on $displayId")
+            true
         }
-    }
-
-    private fun launchWithShizuku(packageName: String, displayId: Int) {
-        val component = context.packageManager.getLaunchIntentForPackage(packageName)
-            ?.component?.flattenToShortString() ?: return
-        val result = ShizukuUtils.runShell(
-            arrayOf("am", "start", "--display", displayId.toString(), "-n", component)
-        )
-        Log.d(TAG, "Shizuku am start result: ${result?.take(200) ?: "no output"}")
+    } catch (e: Exception) {
+        val msg = "fallback startActivity failed: ${e.javaClass.simpleName}: ${e.message}"
+        Log.w(TAG, msg, e)
+        Diagnostics.record(TAG, msg)
+        false
     }
 }
