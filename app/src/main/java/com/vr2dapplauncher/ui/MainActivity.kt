@@ -26,13 +26,20 @@ import java.io.File
 /**
  * 2D 管理界面（保留，但不再是进入 VR 的必经步骤）。
  *
- * ★ 本版关键修正（修掉「已授权仍闪退」）：
- *   - 虚拟屏不再在 2D 界面创建（那里没有 EGL context，SurfaceTexture(0) 必然失败）；
- *     授权只把 MediaProjection 交给 ProjectionHolder，真正的建屏推迟到
- *     VrActivity 的 GL 线程 onSurfaceCreated()。
- *   - 启动 ProjectionService 前台服务，MediaProjection 才能持续存活。
- *   - getMediaProjection / 授权弹窗 / 启动 VR 全部 try/catch + Diagnostics 记录。
- *   - 提供「一键进入 VR」「应用列表」「导出诊断」「启动即 VR」。
+ * ★ 本版修掉真机日志里的「已授权仍闪退」：
+ *   [MainActivity] getMediaProjection threw SecurityException:
+ *       Media projections require a foreground service of type
+ *       ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
+ *   根因：换取 MediaProjection 实例 在 ProjectionService.start() **之前**同步调用，
+ *   而 startForegroundService() 是异步的，FGS 还没前台运行；异常后直接 return，
+ *   前台服务一次都没启动（日志里完全没有 [ProjectionService] 记录）。
+ *   修法：授权结果回来只把凭证存进 ProjectionHolder，绝不在这里 换取 MediaProjection 实例；
+ *   用 ProjectionService.postWhenForeground() 把「刷新 / 进 VR」排到 FGS 真正
+ *   startForeground() 成功之后；真正 换取 MediaProjection 实例 推迟到 VR 的 GL 线程建屏时。
+ *
+ * ★ Android 14 硬规则：一次用户同意 = 一次 createVirtualDisplay()，
+ *   同一个 Intent 不能重复 换取 MediaProjection 实例。所以「多开独立虚拟屏」=
+ *   一屏一个凭证：每点一次授权，池子里多一个凭证，进 VR 时逐块消费。
  */
 class MainActivity : AppCompatActivity() {
 
@@ -84,8 +91,12 @@ class MainActivity : AppCompatActivity() {
             ).show()
         }
 
-        btnAuthorize.setOnClickListener {
-            if (ProjectionHolder.has()) releaseProjection() else requestProjection()
+        // 点击 = 再加一个授权凭证（Android 14 每块虚拟屏一次同意）；
+        // 长按 = 释放全部凭证并停止前台服务。
+        btnAuthorize.setOnClickListener { requestProjection() }
+        btnAuthorize.setOnLongClickListener {
+            releaseProjection()
+            true
         }
         btnAppList.setOnClickListener { startActivity(Intent(this, AppListActivity::class.java)) }
         btnEnterVr.setOnClickListener { enterVrMode() }
@@ -94,22 +105,29 @@ class MainActivity : AppCompatActivity() {
 
         refreshUi()
 
-        // 启动即 VR：已授权就直接进；未授权先自动请求授权，回调里再进。
+        // 启动即 VR：有凭证就直接进；没有凭证先自动请求授权，回调里再进。
         if (isAutoVr()) {
             pendingEnterVr = true
-            if (ProjectionHolder.has()) enterVrMode() else requestProjection()
+            if (ProjectionHolder.hasConsent()) enterVrMode() else requestProjection()
         }
     }
 
     private fun refreshUi() {
-        val hasProjection = ProjectionHolder.has()
-        tvVdStatus.text = if (hasProjection) {
-            "✅ 屏幕捕获已授权\n虚拟屏将在进入 VR 时按应用列表逐块创建"
+        val consents = ProjectionHolder.consentCount()
+        val selected = LaunchPlan.load(this).size
+        tvVdStatus.text = if (consents > 0) {
+            "✅ 屏幕捕获凭证：$consents 个（可建 $consents 块独立虚拟屏）\n" +
+                "已选 $selected 个应用；Android 14 每块屏需单独授权一次"
         } else {
-            "屏幕捕获: 未授权（点下方按钮授权，无需 root）"
+            "屏幕捕获: 未授权（点下方按钮授权，无需 root）\n" +
+                "Android 14：每次进入 VR 需重新授权一次"
         }
-        tvVdStatus.setTextColor(if (hasProjection) 0xFF88CC88.toInt() else 0xFFFFAA00.toInt())
-        btnAuthorize.text = if (hasProjection) "释放屏幕捕获授权" else "1. 授权屏幕捕获（创建虚拟屏）"
+        tvVdStatus.setTextColor(if (consents > 0) 0xFF88CC88.toInt() else 0xFFFFAA00.toInt())
+        btnAuthorize.text = if (ProjectionHolder.has()) {
+            "再授权一次（+1 块虚拟屏）· 长按释放"
+        } else {
+            "1. 授权屏幕捕获（每次 = 1 块虚拟屏）"
+        }
         btnEnterVr.isEnabled = true
 
         val apps = LaunchPlan.load(this)
@@ -158,43 +176,45 @@ class MainActivity : AppCompatActivity() {
             return
         }
 
-        val projection = try {
-            mediaProjectionManager.getMediaProjection(resultCode, data)
-        } catch (e: Exception) {
-            Diagnostics.record(TAG, "getMediaProjection threw ${e.javaClass.simpleName}: ${e.message}")
-            null
-        }
-        if (projection == null) {
-            pendingEnterVr = false
-            Toast.makeText(this, "无法获取 MediaProjection", Toast.LENGTH_LONG).show()
-            refreshUi()
-            return
-        }
-
-        // ★ 全局单例持有 + 统一注册 Callback（Android 14 要求 createVirtualDisplay 前注册）
-        ProjectionHolder.set(projection)
+        // ★ 只存凭证，不碰 换取 MediaProjection 实例。这是闪退根因的修复点：
+        //   startForegroundService() 异步，此刻 FGS 还没前台，Android 14 会直接抛
+        //   SecurityException，异常后 return 又会让 FGS 永远起不来。
+        ProjectionHolder.addConsent(resultCode, data)
         ProjectionService.start(this)
-        Diagnostics.record(TAG, "MediaProjection granted + FGS started")
-        refreshUi()
-        Toast.makeText(this, "授权成功，可以进入 VR 了", Toast.LENGTH_SHORT).show()
 
-        if (pendingEnterVr || isAutoVr()) enterVrMode()
+        // FGS 真正 startForeground() 成功后才刷新 UI / 进 VR，
+        // 保证 GL 线程建屏时已有 mediaProjection 类型的前台服务。
+        ProjectionService.postWhenForeground {
+            if (isFinishing || isDestroyed) return@postWhenForeground
+            val fgsError = ProjectionService.foregroundError()
+            Diagnostics.record(
+                TAG,
+                "consent stored + FGS ready; pool=${ProjectionHolder.consentCount()}, fgsError=$fgsError"
+            )
+            refreshUi()
+            if (fgsError == null) {
+                Toast.makeText(this, "授权成功，可以进入 VR 了", Toast.LENGTH_SHORT).show()
+            } else {
+                Toast.makeText(this, "前台服务异常，请点「导出诊断」查看原因", Toast.LENGTH_LONG).show()
+            }
+            if (pendingEnterVr || isAutoVr()) enterVrMode()
+        }
     }
 
     private fun releaseProjection() {
         VrVirtualDisplayHost.shared?.stop()
         ProjectionHolder.clear()
         ProjectionService.stop(this)
-        Diagnostics.record(TAG, "projection released by user")
+        Diagnostics.record(TAG, "all consents released by user")
         refreshUi()
-        Toast.makeText(this, "已释放屏幕捕获授权", Toast.LENGTH_SHORT).show()
+        Toast.makeText(this, "已释放全部屏幕捕获授权", Toast.LENGTH_SHORT).show()
     }
 
-    /** 一键进 VR：没授权就先自动走授权，授权回调里再进来。 */
+    /** 一键进 VR：没有凭证就先自动走授权，授权回调里再进来。 */
     private fun enterVrMode() {
-        if (!ProjectionHolder.has()) {
+        if (!ProjectionHolder.hasConsent()) {
             pendingEnterVr = true
-            Toast.makeText(this, "需要先授权屏幕捕获", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, "需要屏幕捕获授权（每块虚拟屏一次）", Toast.LENGTH_SHORT).show()
             requestProjection()
             return
         }

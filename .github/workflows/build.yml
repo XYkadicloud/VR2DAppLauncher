@@ -210,6 +210,28 @@ jobs:
               if token not in mani:
                   errors.append("AndroidManifest.xml missing " + token)
 
+          # 真机日志回归门禁：getMediaProjection() 早于 FGS 前台会抛
+          # SecurityException 并导致「已授权仍闪退」。授权只存凭证，
+          # 真正的 getMediaProjection() 必须在 GL 线程建屏时逐凭证消费。
+          base = os.path.join(src, "java/com/vr2dapplauncher")
+          main_t = open(os.path.join(base, "ui/MainActivity.kt"), encoding="utf-8").read()
+          ps_t = open(os.path.join(base, "shizuku/ProjectionService.kt"), encoding="utf-8").read()
+          ph_t = open(os.path.join(base, "shizuku/ProjectionHolder.kt"), encoding="utf-8").read()
+          host_t = open(os.path.join(base, "shizuku/VrVirtualDisplayHost.kt"), encoding="utf-8").read()
+          if "getMediaProjection(" in main_t:
+              errors.append("MainActivity still calls getMediaProjection (FGS is async -> SecurityException)")
+          if "ProjectionHolder.addConsent(" not in main_t or "ProjectionService.postWhenForeground(" not in main_t:
+              errors.append("MainActivity must store consent and defer until FGS foreground")
+          for token in ["fun addConsent(", "fun takeProjection(", "fun consentCount(", "registerCallback"]:
+              if token not in ph_t:
+                  errors.append("ProjectionHolder missing " + token)
+          if "fun postWhenForeground(" not in ps_t or "fun notifyForeground(" not in ps_t:
+              errors.append("ProjectionService missing FGS-ready signal")
+          if "ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION" not in ps_t:
+              errors.append("ProjectionService missing typed startForeground")
+          if "ProjectionHolder.takeProjection(context)" not in host_t:
+              errors.append("VrVirtualDisplayHost must consume one consent per virtual display")
+
           if errors:
               for e in errors:
                   print("::error::" + e)

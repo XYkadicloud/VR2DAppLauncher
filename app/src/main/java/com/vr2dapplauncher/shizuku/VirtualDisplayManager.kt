@@ -36,9 +36,10 @@ object VirtualDisplayManager {
     /**
      * 创建一块虚拟屏。任何失败都返回 null 并记录原因，绝不向外抛异常。
      *
-     * 注意：Android 14 起一次 MediaProjection 授权只允许 createVirtualDisplay 一次。
-     * 多次调用由 VrVirtualDisplayHost 逐个捕获，失败时降级为复用第一块屏，
-     * 不会造成闪退或全黑。
+     * Android 14 起「一次用户同意 = 一次 createVirtualDisplay()」：同一个
+     * MediaProjection 实例上第二次调用会抛 SecurityException。因此调用方
+     * （VrVirtualDisplayHost）必须为每块屏消费一个独立的授权凭证，每个
+     * MediaProjection 只在这里用一次；凭证不足的屏不建屏、只留占位并写诊断。
      */
     fun createVirtualDisplay(
         args: VirtualDisplayArgs,

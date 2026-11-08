@@ -23,6 +23,12 @@ import kotlinx.coroutines.launch
  *   本版把「建屏」整个推迟到 CardboardView 的 GL 线程（onSurfaceCreated），
  *   SurfaceTexture 从创建起就 attach 到真实 GL 纹理，全流程 try/catch + 诊断记录。
  *
+ * ★ Android 14 授权模型（官方文档「用户意见征求」）：
+ *   「一次用户同意 = 一次 createVirtualDisplay()」，同一个 token 只能
+ *   getMediaProjection() 一次。所以这里为**每块屏消费一个独立凭证**，每个
+ *   MediaProjection 只调用一次 createVirtualDisplay()。凭证不足的槽只生成占位
+ *   纹理、不建屏，并写入 lastError / Diagnostics，绝不闪退或全黑。
+ *
  * 主屏此时正被 VR 界面占满，因此每块虚拟屏都是 OWN_CONTENT_ONLY 独立内容屏，
  * 不镜像主屏；应用由 am start --display 显式放上去。
  */
@@ -104,16 +110,6 @@ class VrVirtualDisplayHost(private val context: Context) {
      */
     fun ensureDisplaysOnGlThread(): Int {
         lastError = null
-        val projection = ProjectionHolder.get()
-        if (projection == null) {
-            lastError = "没有屏幕捕获授权，无法创建虚拟屏"
-            Diagnostics.record(TAG, lastError ?: "no projection")
-            return 0
-        }
-        // 显式非空局部变量：createSlotLocked 要求非空 MediaProjection，
-        // 用局部 val 固定下来，避免嵌套 lambda 里依赖智能转换的编译器边界差异。
-        val proj: android.media.projection.MediaProjection = projection
-
         val requested = LaunchPlan.load(context).take(MAX_SCREENS)
         // 一个应用都没有时仍建 1 块占位屏，保证 VR 不是全黑且有明确提示。
         val plan = if (requested.isEmpty()) {
@@ -126,18 +122,31 @@ class VrVirtualDisplayHost(private val context: Context) {
             releaseSlotsLocked()
             plan.forEachIndexed { index, app ->
                 val slot = ScreenSlot(index, app.packageName, app.component, app.label)
-                createSlotLocked(slot, proj)
+                // ★ 每块独立虚拟屏消费一个独立的授权凭证。
+                //   Android 14 规定：一次同意 = 一次 getMediaProjection()、一次
+                //   createVirtualDisplay()；复用同一个凭证会直接抛 SecurityException。
+                //   占位槽不消费凭证。
+                val projection: android.media.projection.MediaProjection? =
+                    if (slot.component.isEmpty()) null else ProjectionHolder.takeProjection(context)
+                createSlotLocked(slot, projection)
                 slots.add(slot)
             }
         }
 
         shared = this
         val created = getSlots().count { it.displayId > 0 }
-        Diagnostics.record(TAG, "ensureDisplays done: ${getSlots().size} slots, $created displays, error=$lastError")
+        Diagnostics.record(
+            TAG,
+            "ensureDisplays done: ${getSlots().size} slots, $created displays, " +
+                "remainingConsents=${ProjectionHolder.consentCount()}, error=$lastError"
+        )
         return created
     }
 
-    private fun createSlotLocked(slot: ScreenSlot, projection: android.media.projection.MediaProjection) {
+    private fun createSlotLocked(
+        slot: ScreenSlot,
+        projection: android.media.projection.MediaProjection?
+    ) {
         val displayArgs = args()
         try {
             // 1) 每个虚拟屏一张独立的 GL_TEXTURE_EXTERNAL_OES 纹理
@@ -168,9 +177,18 @@ class VrVirtualDisplayHost(private val context: Context) {
             slot.surfaceTexture = st
             slot.surface = surface
 
-            // 3) 建独立虚拟屏；占位槽不建屏、不启动应用
+            // 3) 占位槽不建屏、不启动应用
             if (slot.component.isEmpty()) {
                 Diagnostics.record(TAG, "placeholder slot[${slot.index}] (no app selected)")
+                return
+            }
+
+            // 3b) 凭证不足：只留占位纹理，明确记录原因，绝不闪退
+            if (projection == null) {
+                val msg = "虚拟屏 #${slot.index} 没有可用授权凭证（Android 14 每块屏需单独授权一次）"
+                Log.w(TAG, msg)
+                Diagnostics.record(TAG, msg)
+                if (lastError == null) lastError = ProjectionHolder.lastError ?: msg
                 return
             }
 
@@ -179,7 +197,7 @@ class VrVirtualDisplayHost(private val context: Context) {
             )
             if (vd == null) {
                 if (lastError == null) {
-                    lastError = "虚拟屏 #${slot.index} 创建失败：系统可能限制一次授权只能创建 1 块虚拟屏"
+                    lastError = "虚拟屏 #${slot.index} 创建失败：系统拒绝或凭证已失效"
                 }
                 return
             }

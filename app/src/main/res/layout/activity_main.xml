@@ -121,7 +121,7 @@
         <TextView
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:text="使用说明：\n1. 授权屏幕捕获（无需 root）；进入 VR 时才在 GL 线程逐块创建独立虚拟屏，不会镜像主屏。\n2. 在「选择应用」里勾选最多 4 个应用；每个应用一块独立虚拟屏、VR 里一个窗口。\n3. 点「一键进入 VR」把手机放入 Cardboard。没授权会自动先弹授权。\n4. 想开机直接进 VR，打开「启动即进入 VR 模式」开关。\n5. 建议安装并激活 Shizuku 并授权：没有它，第三方应用无法被可靠地启动到独立虚拟屏（系统会拦截）。\n6. 分辨率 / DPI / 刷新率在设置里可直接输入数值；改完需重新进入 VR 才会重建虚拟屏。\n7. 若闪退，点「导出诊断日志」，可直接查看并复制，无需 adb logcat。"
+            android:text="使用说明：\n1. 授权屏幕捕获（无需 root）。Android 14 规定「一次同意 = 一块虚拟屏」，想同时开几个应用就点几次授权；长按授权按钮可释放。\n2. 在「选择应用」里勾选最多 4 个应用；每个应用一块独立虚拟屏、VR 里一个窗口。\n3. 点「一键进入 VR」把手机放入 Cardboard。没授权会自动先弹授权。\n4. 想开机直接进 VR，打开「启动即进入 VR 模式」开关。\n5. 建议安装并激活 Shizuku 并授权：没有它，第三方应用无法被可靠地启动到独立虚拟屏（系统会拦截）。\n6. 分辨率 / DPI / 刷新率在设置里可直接输入数值；改完需重新进入 VR 才会重建虚拟屏。\n7. 若闪退，点「导出诊断日志」，可直接查看并复制，无需 adb logcat。"
             android:textSize="12sp"
             android:textColor="#888888"
             android:lineSpacingMultiplier="1.35"

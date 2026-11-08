@@ -191,6 +191,24 @@ if "windowRenderer.startDrag(selected)" not in T[vra]:
 if "ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION" not in T[ps]:
     errors.append("ProjectionService missing typed startForeground (Android 14 FGS crash)")
 
+# ------------------------------- 8b) Android 14 MediaProjection 顺序 / 一屏一凭证
+# 真机日志：getMediaProjection() 早于 FGS 前台 -> SecurityException -> 闪退。
+# 授权结果回来只能存凭证，真正的 getMediaProjection() 必须在 GL 线程建屏时。
+if "getMediaProjection(" in T[main]:
+    errors.append("MainActivity still calls getMediaProjection (FGS is async -> SecurityException)")
+if "ProjectionHolder.addConsent(" not in T[main]:
+    errors.append("MainActivity must store the consent via ProjectionHolder.addConsent")
+if "ProjectionService.postWhenForeground(" not in T[main]:
+    errors.append("MainActivity must defer VR entry until FGS is foreground")
+ph = txt("shizuku/ProjectionHolder.kt")
+for token in ["fun addConsent(", "fun takeProjection(", "fun consentCount(", "registerCallback"]:
+    if token not in ph:
+        errors.append("ProjectionHolder missing " + token)
+if "fun postWhenForeground(" not in T[ps] or "fun notifyForeground(" not in T[ps]:
+    errors.append("ProjectionService missing FGS-ready signal")
+if "ProjectionHolder.takeProjection(context)" not in T[host]:
+    errors.append("VrVirtualDisplayHost must consume one consent per virtual display")
+
 # ------------------------------------------------------------ 9) 括号平衡
 def balance(src):
     i, n = 0, len(src)
