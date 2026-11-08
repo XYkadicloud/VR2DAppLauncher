@@ -289,7 +289,7 @@ class WindowManager(private val context: android.content.Context, private val di
     fun focusWindow(windowId: Long): Boolean {
         val window = windows[windowId] ?: return false
 
-        if (focusedWindowId != -1 && focusedWindowId != windowId) {
+        if (focusedWindowId != -1L && focusedWindowId != windowId) {
             windows[focusedWindowId]?.let { prev ->
                 prev.isFocused = false
                 CoroutineScope(Dispatchers.IO).launch {
@@ -323,7 +323,7 @@ class WindowManager(private val context: android.content.Context, private val di
             .sortedByDescending { it.zOrder }
     }
 
-    fun getFocusedWindow(): WindowInfo? = if (focusedWindowId != -1) windows[focusedWindowId] else null
+    fun getFocusedWindow(): WindowInfo? = if (focusedWindowId != -1L) windows[focusedWindowId] else null
 
     fun findWindowsByPackage(packageName: String): List<WindowInfo> {
         return windows.values.filter { it.packageName == packageName }

@@ -439,7 +439,7 @@ class VrWindowRenderer(
 
     fun setSelected(windowId: Long) {
         selectedWindowId = windowId
-        if (windowId != -1) windowManager.focusWindow(windowId)
+        if (windowId != -1L) windowManager.focusWindow(windowId)
     }
 
     fun startDrag(windowId: Long, startX: Float, startY: Float) {

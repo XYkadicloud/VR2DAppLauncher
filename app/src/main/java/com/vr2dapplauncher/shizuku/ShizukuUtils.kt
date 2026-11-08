@@ -55,11 +55,17 @@ object ShizukuUtils {
     }
 
     /**
-     * 以 shell 身份执行一条命令（Shizuku 提供的官方能力，替代反射 hidden API）。
+     * 以 shell 身份执行一条命令。
+     *
+     * ★ dev.rikka.shizuku:api:13.1.5 里 Shizuku.newProcess() 是 **private**
+     *   （run #12 编译器实测：Cannot access ... it is private in 'rikka/shizuku/Shizuku'）。
+     *   之前只按 AAR 常量池核对了方法存在性，没核对可见性。这里改用反射取到
+     *   ShizukuRemoteProcess（继承 java.lang.Process）；反射失败或 Shizuku 未启动时
+     *   降级为普通进程，保证 Shizuku 作为"可选增强"不会让功能硬崩。
      * @return stdout 文本，失败返回 null
      */
     fun runShell(command: Array<String>): String? = try {
-        val process = Shizuku.newProcess(command, null, null)
+        val process: Process = newShizukuProcess(command) ?: Runtime.getRuntime().exec(command)
         val output = process.inputStream.bufferedReader().use { it.readText() }
         try {
             process.waitFor()
@@ -70,6 +76,21 @@ object ShizukuUtils {
         output
     } catch (e: Exception) {
         android.util.Log.w("ShizukuUtils", "runShell failed: ${command.joinToString(" ")}", e)
+        null
+    }
+
+    /** 反射调用 private static Shizuku.newProcess；不可用返回 null */
+    private fun newShizukuProcess(command: Array<String>): Process? = try {
+        val method = Shizuku::class.java.getDeclaredMethod(
+            "newProcess",
+            Array<String>::class.java,
+            Array<String>::class.java,
+            String::class.java
+        )
+        method.isAccessible = true
+        method.invoke(null, command, null, null) as? Process
+    } catch (e: Exception) {
+        android.util.Log.w("ShizukuUtils", "Shizuku.newProcess unavailable, fallback to plain process", e)
         null
     }
 }

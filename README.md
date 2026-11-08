@@ -17,7 +17,7 @@
 - **Shizuku**：**可选增强**，不再是创建虚拟显示器的前置条件。已接入的部分：
   - `Shizuku.pingBinder()` / `checkSelfPermission()` / `requestPermission(int)` 权限检测；
   - `SystemServiceHelper.getSystemService()` + `ShizukuBinderWrapper` 取得 `display` / `input` / `activity` / `window` / `package` / `audio` 等系统服务 Binder；
-  - `Shizuku.newProcess()` 执行 `dumpsys input` 解析、`input -d <displayId> tap/keyevent` 注入、`am start --display <id>` 在指定 display 启动应用。
+  - 反射调用 `Shizuku.newProcess()`（13.1.5 中该方法是 **private**，反射失败或 Shizuku 未启动时降级为普通进程）执行 `dumpsys input` 解析、`input -d <displayId> tap/keyevent` 注入、`am start --display <id>` 在指定 display 启动应用。
 - **应用启动**：公开 API `ActivityOptions.setLaunchDisplayId(displayId)` 为主，Shizuku shell 作为增强尝试。
 - **多窗口**：`WindowManager` 维护窗口 id / bounds / Z-order / 焦点 / 最小化 / 最大化 / 可见性，`VrWindowRenderer` 在 VR 中绘制窗口边框、标题栏与控制按钮。
 
