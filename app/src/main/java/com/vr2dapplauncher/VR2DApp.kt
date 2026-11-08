@@ -2,7 +2,6 @@ package com.vr2dapplauncher
 
 import android.app.Application
 import android.util.Log
-import rikka.shizuku.Shizuku
 
 /**
  * 应用程序入口

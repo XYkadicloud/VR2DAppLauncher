@@ -3,121 +3,63 @@ package com.vr2dapplauncher.shizuku
 import android.app.ActivityOptions
 import android.content.Context
 import android.content.Intent
-import android.content.pm.PackageManager
-import android.os.Build
 import android.util.Log
 import android.widget.Toast
-import dev.rikka.tools.refine.Refine
 
 /**
- * 在虚拟显示器上启动应用
- * 对应屏连/屏易连的 ServiceUtils._launchPackage / launchAppWithShizuku
+ * 在虚拟显示器上启动应用。
+ *
+ * 公开 API 路径：ActivityOptions.setLaunchDisplayId(displayId) + startActivity。
+ * Shizuku 增强路径：有权限时用 `am start --display <id> -n <component>` 由 shell 侧再尝试。
+ * 不再使用 Refine / IActivityManager / setLaunchWindowingMode（均为隐藏 API，编译不过）。
  */
 class AppLauncher(private val context: Context) {
     companion object {
         private const val TAG = "AppLauncher"
         private const val FLAG_ACTIVITY_NEW_TASK = 0x10000000
-        private const val WINDOWING_MODE_FULLSCREEN = 1
     }
 
-    /**
-     * 在虚拟显示器上启动指定包名的应用
-     */
     fun launchPackage(packageName: String, displayId: Int) {
-        val displayManager = context.getSystemService(Context.DISPLAY_SERVICE) as android.hardware.display.DisplayManager
-        val display = displayManager.getDisplay(displayId)
-        if (display == null) {
+        val displayManager =
+            context.getSystemService(Context.DISPLAY_SERVICE) as android.hardware.display.DisplayManager
+        if (displayManager.getDisplay(displayId) == null) {
             Log.w(TAG, "Display $displayId not found")
+            Toast.makeText(context, "虚拟显示器 $displayId 不存在", Toast.LENGTH_SHORT).show()
             return
         }
-        _launchPackage(packageName, displayId)
-    }
 
-    private fun _launchPackage(packageName: String, displayId: Int) {
+        launchNormally(packageName, displayId)
         if (ShizukuUtils.hasPermission()) {
             launchWithShizuku(packageName, displayId)
-        } else {
-            launchNormally(packageName, displayId)
         }
-    }
-
-    /** 标准路径：Context.startActivity + ActivityOptions.setLaunchDisplayId */
-    private fun launchNormally(packageName: String, displayId: Int) {
-        val pm = context.packageManager
-        val intent = pm.getLaunchIntentForPackage(packageName)?.apply {
-            addFlags(FLAG_ACTIVITY_NEW_TASK)
-        } ?: return
-
-        val options = ActivityOptions.makeBasic().apply {
-            setLaunchDisplayId(displayId)
-        }
-
-        context.startActivity(intent, options.toBundle())
-
-        // 启动后绑定输入设备
         InputRouter.bindAllExternalInputToDisplay(displayId)
     }
 
-    /** Shizuku 路径：IActivityManager.startActivityAsUserWithFeature */
-    private fun launchWithShizuku(packageName: String, displayId: Int) {
-        val pm = context.packageManager
-        val baseIntent = pm.getLaunchIntentForPackage(packageName) ?: return
-        val component = baseIntent.component ?: return
-
-        val intent = Intent(Intent.ACTION_MAIN).apply {
-            addFlags(FLAG_ACTIVITY_NEW_TASK)
-            addCategory(Intent.CATEGORY_LAUNCHER)
-            setComponent(component)
-            setPackage(packageName)
-        }
-
-        val options = ActivityOptions.makeBasic().apply {
-            setLaunchDisplayId(displayId)
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) { // API 26+
-                setLaunchWindowingMode(WINDOWING_MODE_FULLSCREEN)
+    private fun launchNormally(packageName: String, displayId: Int) {
+        val intent: Intent = context.packageManager.getLaunchIntentForPackage(packageName)
+            ?.apply { addFlags(FLAG_ACTIVITY_NEW_TASK) }
+            ?: run {
+                Toast.makeText(context, "找不到应用: $packageName", Toast.LENGTH_SHORT).show()
+                return
             }
-        }
-
         try {
-            val activityManager = ShizukuServiceUtils.getActivityManager() ?: throw IllegalStateException("ActivityManager not available")
-            val unsafeOptions = Refine.unsafeCast(options) as ActivityOptions
-
-            val result: Int
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) { // API 29+
-                result = activityManager.startActivityAsUserWithFeature(
-                    null, // caller thread
-                    packageName, // featureId
-                    null, // callingPackage
-                    intent,
-                    null, // resolvedType
-                    null, // resultTo
-                    null, // callingFeatureId
-                    0, // userId = current
-                    0, // flags
-                    null, // profilerInfo
-                    unsafeOptions.toBundle(),
-                    android.os.UserHandle.USER_CURRENT
-                )
-            } else {
-                result = activityManager.startActivity(
-                    null, packageName, intent, null, null, null, 0, 0, null, unsafeOptions.toBundle()
-                )
+            val options = ActivityOptions.makeBasic().apply {
+                setLaunchDisplayId(displayId)
             }
-
-            if (result >= 0) {
-                Log.d(TAG, "Shizuku launch successful: $packageName on display $displayId")
-                InputRouter.bindAllExternalInputToDisplay(displayId)
-            } else {
-                Log.w(TAG, "Shizuku launch failed with code: $result")
-                showToast("使用 Shizuku 启动应用失败，返回值: $result")
-            }
+            context.startActivity(intent, options.toBundle())
+            Log.d(TAG, "Launched $packageName on display $displayId")
         } catch (e: Exception) {
-            Log.e(TAG, "Shizuku launch exception", e)
-            showToast("使用 Shizuku 启动应用失败: ${e.message}")
+            Log.e(TAG, "startActivity on display $displayId failed", e)
+            Toast.makeText(context, "启动失败: ${e.message}", Toast.LENGTH_SHORT).show()
         }
     }
 
-    private fun showToast(msg: String) {
-        Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
+    private fun launchWithShizuku(packageName: String, displayId: Int) {
+        val component = context.packageManager.getLaunchIntentForPackage(packageName)
+            ?.component?.flattenToShortString() ?: return
+        val result = ShizukuUtils.runShell(
+            arrayOf("am", "start", "--display", displayId.toString(), "-n", component)
+        )
+        Log.d(TAG, "Shizuku am start result: ${result?.take(200) ?: "no output"}")
     }
 }

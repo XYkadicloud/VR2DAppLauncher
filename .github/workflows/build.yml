@@ -19,24 +19,24 @@ jobs:
     timeout-minutes: 60
 
     steps:
-      - name: Checkout VR2DAppLauncher repository
+      - name: Checkout VR2DAppLauncher
         uses: actions/checkout@v4
         with:
           path: VR2DAppLauncher
 
-      - name: Checkout Cardboard SDK source (for building AAR)
+      - name: Checkout Cardboard SDK source
         uses: actions/checkout@v4
         with:
           repository: googlevr/cardboard
           ref: v1.36.0
           path: cardboard-sdk
 
-      - name: Setup Java 21 (required for AGP 9.2.0)
+      # The Cardboard SDK repo uses AGP 9.2.0 which needs JDK 21.
+      - name: Setup Java 21 (Cardboard SDK)
         uses: actions/setup-java@v4
         with:
-          distribution: 'temurin'
+          distribution: temurin
           java-version: '21'
-          cache: 'gradle'
 
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
@@ -61,22 +61,62 @@ jobs:
         run: |
           chmod +x gradlew
           ./gradlew :sdk:assembleRelease --no-daemon --stacktrace
+          ls -la sdk/build/outputs/aar/
 
-      - name: Copy Cardboard SDK AAR to VR2DAppLauncher
+      - name: Copy Cardboard SDK AAR into app/libs
         run: |
           mkdir -p VR2DAppLauncher/app/libs
-          cp cardboard-sdk/sdk/build/outputs/aar/sdk-release.aar VR2DAppLauncher/app/libs/cardboard-sdk.aar
+          # 不要硬编码 sdk-release.aar：不同 AGP 版本输出名可能变化，用 find 定位
+          AAR=$(find cardboard-sdk/sdk/build/outputs/aar -name '*.aar' -type f | head -n 1)
+          if [ -z "$AAR" ]; then
+            echo "Cardboard SDK AAR not found; contents of outputs dir:"
+            find cardboard-sdk/sdk/build/outputs -maxdepth 3 -type f | head -40
+            exit 1
+          fi
+          echo "Using AAR: $AAR"
+          cp "$AAR" VR2DAppLauncher/app/libs/cardboard-sdk.aar
           ls -la VR2DAppLauncher/app/libs/
 
-      - name: Make gradlew executable
-        working-directory: VR2DAppLauncher
-        run: chmod +x gradlew
+      # The app uses AGP 8.7.2, which is validated on JDK 17.
+      - name: Setup Java 17 (app)
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
 
       - name: Build Debug APK
         working-directory: VR2DAppLauncher
-        run: ./gradlew assembleDebug --no-daemon --stacktrace
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleDebug --no-daemon --stacktrace
 
-      - name: Upload APK artifact
+      # 明确断言 APK 真的被编译出来（而不是几十秒就结束的"假成功"）。
+      - name: Verify Debug APK was really produced
+        run: |
+          APK=VR2DAppLauncher/app/build/outputs/apk/debug/app-debug.apk
+          if [ ! -f "$APK" ]; then
+            echo "::error::APK was not produced: $APK"
+            find VR2DAppLauncher/app/build -maxdepth 5 -type f | head -40
+            exit 1
+          fi
+          SIZE=$(stat -c %s "$APK")
+          echo "APK: $APK ($SIZE bytes)"
+          if [ "$SIZE" -lt 100000 ]; then
+            echo "::error::APK is suspiciously small ($SIZE bytes)"
+            exit 1
+          fi
+          echo "--- APK contents (first 30) ---"
+          unzip -l "$APK" | head -30
+          echo "--- dex / manifest check ---"
+          unzip -l "$APK" | grep -E "classes.*\.dex|AndroidManifest\.xml" || {
+            echo "::error::APK is missing classes.dex or AndroidManifest.xml"
+            exit 1
+          }
+          echo "--- compiled Kotlin classes check ---"
+          find VR2DAppLauncher/app/build/tmp/kotlin-classes -name "*.class" | head -10
+          echo "Kotlin class files: $(find VR2DAppLauncher/app/build/tmp/kotlin-classes -name '*.class' | wc -l)"
+
+      - name: Upload Debug APK
         uses: actions/upload-artifact@v4
         with:
           name: app-debug-apk
@@ -94,76 +134,3 @@ jobs:
             cardboard-sdk/**/build/reports/
             cardboard-sdk/**/build/outputs/
           retention-days: 7
-
-  # Optional: Release build on tags
-  release:
-    name: Build Release APK
-    runs-on: ubuntu-latest
-    timeout-minutes: 60
-    if: startsWith(github.ref, 'refs/tags/v')
-    needs: build
-
-    steps:
-      - name: Checkout VR2DAppLauncher repository
-        uses: actions/checkout@v4
-        with:
-          path: VR2DAppLauncher
-
-      - name: Checkout Cardboard SDK source (for building AAR)
-        uses: actions/checkout@v4
-        with:
-          repository: googlevr/cardboard
-          ref: v1.36.0
-          path: cardboard-sdk
-
-      - name: Setup Java 21 (required for AGP 9.2.0)
-        uses: actions/setup-java@v4
-        with:
-          distribution: 'temurin'
-          java-version: '21'
-          cache: 'gradle'
-
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
-        with:
-          cmdline-tools-version: latest
-          accept-android-sdk-licenses: true
-          log-accepted-android-sdk-licenses: true
-          packages: platform-tools cmdline-tools;latest platforms;android-35 build-tools;35.0.0 ndk;29.0.14206865
-
-      - name: Cache Gradle packages
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.gradle/caches
-            ~/.gradle/wrapper
-          key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
-          restore-keys: |
-            ${{ runner.os }}-gradle-
-
-      - name: Build Cardboard SDK AAR
-        working-directory: cardboard-sdk
-        run: |
-          chmod +x gradlew
-          ./gradlew :sdk:assembleRelease --no-daemon --stacktrace
-
-      - name: Copy Cardboard SDK AAR to VR2DAppLauncher
-        run: |
-          mkdir -p VR2DAppLauncher/app/libs
-          cp cardboard-sdk/sdk/build/outputs/aar/sdk-release.aar VR2DAppLauncher/app/libs/cardboard-sdk.aar
-          ls -la VR2DAppLauncher/app/libs/
-
-      - name: Make gradlew executable
-        working-directory: VR2DAppLauncher
-        run: chmod +x gradlew
-
-      - name: Build Release APK
-        working-directory: VR2DAppLauncher
-        run: ./gradlew assembleRelease --no-daemon --stacktrace
-
-      - name: Upload Release APK
-        uses: actions/upload-artifact@v4
-        with:
-          name: app-release-apk
-          path: VR2DAppLauncher/app/build/outputs/apk/release/app-release.apk
-          retention-days: 90

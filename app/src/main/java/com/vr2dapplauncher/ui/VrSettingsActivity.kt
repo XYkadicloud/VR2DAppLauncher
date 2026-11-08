@@ -21,13 +21,44 @@ import com.vr2dapplauncher.R
 import com.vr2dapplauncher.vr.VrSettings
 
 /**
+ * 顶层声明（不要放进 companion object）：SettingsAdapter 是嵌套类，Kotlin 里
+ * 嵌套类访问外部类 companion 成员必须显式写 `VrSettingsActivity.XXX`，
+ * 用简单名会解析失败。放到顶层后类体和嵌套类都能用简单名访问。
+ */
+private const val TAG = "VrSettingsActivity"
+
+private fun getDeviceTypeName(type: Int): String {
+    return when (type) {
+        AudioDeviceInfo.TYPE_BUILTIN_SPEAKER -> "内置扬声器"
+        AudioDeviceInfo.TYPE_WIRED_HEADSET -> "有线耳机"
+        AudioDeviceInfo.TYPE_BLUETOOTH_A2DP -> "蓝牙 A2DP"
+        AudioDeviceInfo.TYPE_BLUETOOTH_SCO -> "蓝牙 SCO"
+        AudioDeviceInfo.TYPE_USB_DEVICE -> "USB 设备"
+        AudioDeviceInfo.TYPE_HDMI -> "HDMI"
+        AudioDeviceInfo.TYPE_DOCK -> "底座"
+        AudioDeviceInfo.TYPE_FM -> "FM"
+        AudioDeviceInfo.TYPE_BUILTIN_EARPIECE -> "听筒"
+        AudioDeviceInfo.TYPE_TELEPHONY -> "通话"
+        AudioDeviceInfo.TYPE_AUX_LINE -> "AUX 线"
+        AudioDeviceInfo.TYPE_IP -> "IP"
+        AudioDeviceInfo.TYPE_BUS -> "总线"
+        AudioDeviceInfo.TYPE_USB_HEADSET -> "USB 耳机"
+        AudioDeviceInfo.TYPE_HEARING_AID -> "助听器"
+        else -> "未知 ($type)"
+    }
+}
+
+/**
  * VR 设置 Activity：配置屏幕参数、画面调整、舒适度设置
- * 参考 OpenNOW-VR 的设置界面设计
  */
 class VrSettingsActivity : AppCompatActivity() {
 
-    private const val TAG = "VrSettingsActivity"
-    
+    companion object {
+        fun createIntent(context: Context): Intent {
+            return Intent(context, VrSettingsActivity::class.java)
+        }
+    }
+
     private lateinit var settings: VrSettings
     private lateinit var recyclerView: RecyclerView
     private lateinit var adapter: SettingsAdapter
@@ -37,7 +68,7 @@ class VrSettingsActivity : AppCompatActivity() {
         setContentView(R.layout.activity_vr_settings)
 
         settings = VrSettings(this)
-        
+
         recyclerView = findViewById(R.id.rv_settings)
         recyclerView.layoutManager = LinearLayoutManager(this)
         adapter = SettingsAdapter(this, settings)
@@ -50,33 +81,6 @@ class VrSettingsActivity : AppCompatActivity() {
     private fun resetToDefaults() {
         settings.resetToDefaults()
         adapter.notifyDataSetChanged()
-    }
-
-    companion object {
-        fun createIntent(context: Context): Intent {
-            return Intent(context, VrSettingsActivity::class.java)
-        }
-        
-        private fun getDeviceTypeName(type: Int): String {
-            return when (type) {
-                AudioDeviceInfo.TYPE_BUILTIN_SPEAKER -> "内置扬声器"
-                AudioDeviceInfo.TYPE_WIRED_HEADSET -> "有线耳机"
-                AudioDeviceInfo.TYPE_BLUETOOTH_A2DP -> "蓝牙 A2DP"
-                AudioDeviceInfo.TYPE_BLUETOOTH_SCO -> "蓝牙 SCO"
-                AudioDeviceInfo.TYPE_USB_DEVICE -> "USB 设备"
-                AudioDeviceInfo.TYPE_HDMI -> "HDMI"
-                AudioDeviceInfo.TYPE_DOCK -> "底座"
-                AudioDeviceInfo.TYPE_FM -> "FM"
-                AudioDeviceInfo.TYPE_BUILTIN_EARPIECE -> "听筒"
-                AudioDeviceInfo.TYPE_TELEPHONY -> "通话"
-                AudioDeviceInfo.TYPE_AUX_LINE -> "AUX 线"
-                AudioDeviceInfo.TYPE_IP -> "IP"
-                AudioDeviceInfo.TYPE_BUS -> "总线"
-                AudioDeviceInfo.TYPE_USB_HEADSET -> "USB 耳机"
-                AudioDeviceInfo.TYPE_HEARING_AID -> "助听器"
-                else -> "未知 ($type)"
-            }
-        }
     }
 
     /** 设置项数据类 */
@@ -120,19 +124,18 @@ class VrSettingsActivity : AppCompatActivity() {
             val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
             val outputDevices = audioManager.getDevices(AudioManager.GET_DEVICES_OUTPUTS)
             val deviceNames = outputDevices.map { "${it.productName} (${getDeviceTypeName(it.type)})" }
-            
+
             return listOf(
                 // --- 音频输出 ---
                 SettingItem.Header("音频输出设置"),
-                
+
                 SettingItem.SpinnerItem(
                     "音频输出设备", "选择虚拟显示器音频路由目标",
                     deviceNames,
-                    { 0 }, // 默认选择第一个
-                    { position -> 
+                    { 0 },
+                    { position ->
                         if (position < outputDevices.size) {
                             val device = outputDevices[position]
-                            // 这里可以保存选择并应用到 AudioRouter
                             Log.d(TAG, "Selected audio device: ${device.productName} (${device.id})")
                         }
                     }
@@ -140,7 +143,7 @@ class VrSettingsActivity : AppCompatActivity() {
 
                 // --- 屏幕几何参数 ---
                 SettingItem.Header("屏幕几何参数 (影响 VR 中虚拟屏幕大小/距离)"),
-                
+
                 SettingItem.FloatSeekBarItem(
                     "屏幕距离", "眼睛到虚拟屏幕的距离 (米)",
                     0.02f, 0.2f, 0.005f,
@@ -364,12 +367,12 @@ class VrSettingsActivity : AppCompatActivity() {
             fun bind(item: SettingItem.SpinnerItem) {
                 tvTitle.text = item.title
                 tvSummary.text = item.summary
-                
+
                 val adapter = ArrayAdapter<String>(context, android.R.layout.simple_spinner_item, item.entries)
                 adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)
                 spinner.adapter = adapter
                 spinner.setSelection(item.getValue())
-                
+
                 spinner.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
                     override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
                         item.onChanged(position)

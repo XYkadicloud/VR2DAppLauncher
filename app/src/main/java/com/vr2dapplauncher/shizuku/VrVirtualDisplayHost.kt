@@ -3,32 +3,42 @@ package com.vr2dapplauncher.shizuku
 import android.content.Context
 import android.graphics.SurfaceTexture
 import android.media.AudioDeviceInfo
+import android.media.projection.MediaProjection
 import android.opengl.GLES11Ext
 import android.opengl.GLES20
 import android.util.Log
 import android.view.Surface
 import com.vr2dapplauncher.vr.VrSettings
-import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 
 /**
- * VR 虚拟显示器宿主：管理虚拟显示器生命周期、SurfaceTexture、GL 纹理
- * 
- * 关键设计：GL 纹理必须在 GL 线程创建，SurfaceTexture 可在 IO 线程创建并稍后绑定
- * 支持从 VrSettings 读取显示配置（分辨率、DPI、刷新率）
+ * 虚拟显示器宿主：管理 VirtualDisplay 生命周期、SurfaceTexture 与 GL 纹理桥接。
+ *
+ * 关键修正（相对早期版本）：
+ *  - 不再把 host 通过 Intent 传递（它不是 Parcelable），改为 companion 单例共享；
+ *  - start() 不再等待 GL 线程：2D 界面没有 GL 线程，等待会导致回调永不触发、
+ *    "创建虚拟显示器"按钮一直卡在"正在创建"。GL 纹理在进入 VR 后按需绑定；
+ *  - 不强制要求 Shizuku：技术验证阶段用 MediaProjection 公开 API 建立虚拟屏幕，
+ *    Shizuku 可用时额外初始化系统服务代理。
  */
-class VrVirtualDisplayHost(private val context: Context) {
+class VrVirtualDisplayHost(
+    private val context: Context,
+    private val mediaProjection: MediaProjection? = null
+) {
     companion object {
         private const val TAG = "VrVirtualDisplayHost"
+
+        /** MainActivity 与 VrActivity 共享同一个宿主实例 */
+        @Volatile
+        var shared: VrVirtualDisplayHost? = null
     }
 
     private var virtualDisplay: android.hardware.display.VirtualDisplay? = null
     private var surfaceTexture: SurfaceTexture? = null
     private var surface: Surface? = null
-    
-    // 从设置读取显示参数
+
     private val settings = VrSettings(context)
     private val args = VirtualDisplayManager.VirtualDisplayArgs(
         name = "VR2DAppLauncher-Display",
@@ -42,93 +52,78 @@ class VrVirtualDisplayHost(private val context: Context) {
     var displayId: Int = -1
         private set
 
-    /** GL 纹理 ID（由 GL 线程创建，供渲染器读取） */
+    /** GL_TEXTURE_EXTERNAL_OES 纹理 ID */
     var glTextureId: Int = 0
         private set
 
-    /** 是否正在运行 */
     var isRunning: Boolean = false
         private set
 
-    /** GL 线程就绪回调：由 VrRenderer 在 onSurfaceCreated 时调用 */
+    /** 可选：GL 线程就绪回调（VrWindowRenderer.onSurfaceCreated 会触发） */
     var onGlThreadReady: ((Int) -> Unit)? = null
-        private set
 
-    /** 音频路由器 */
     private val audioRouter = AudioRouter(context)
 
-    /**
-     * 启动虚拟显示器（第一阶段：IO 线程）
-     * 创建 SurfaceTexture(textureId=0) 和 Surface，启动虚拟显示器
-     * GL 纹理创建延迟到 GL 线程就绪时
-     */
+    /** 启动虚拟显示器（回调在 IO 线程） */
     fun start(onReady: (Boolean) -> Unit) = CoroutineScope(Dispatchers.IO).launch {
-        // 1. 确保 Shizuku 权限
-        if (!ShizukuUtils.hasPermission()) {
-            Log.w(TAG, "Shizuku permission not granted")
+        if (isRunning) {
+            onReady(true)
+            return@launch
+        }
+
+        // Shizuku 是增强项，不是前置条件
+        if (ShizukuUtils.hasPermission()) {
+            ShizukuServiceUtils.initWithShizuku()
+        } else {
+            Log.w(TAG, "Shizuku not available; continuing with MediaProjection path")
+        }
+
+        try {
+            surfaceTexture = SurfaceTexture(0)
+            surfaceTexture?.setDefaultBufferSize(args.width, args.height)
+            surface = Surface(surfaceTexture!!)
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to create SurfaceTexture/Surface", e)
+            cleanup()
             onReady(false)
             return@launch
         }
 
-        // 2. 初始化 Shizuku 系统服务
-        ShizukuServiceUtils.initWithShizuku()
-
-        // 3. 创建 SurfaceTexture (textureId=0，稍后在 GL 线程绑定真实纹理)
-        surfaceTexture = SurfaceTexture(0)
-        surfaceTexture?.setDefaultBufferSize(args.width, args.height)
-
-        // 4. 创建 Surface
-        surface = Surface(surfaceTexture!!)
-
-        // 5. 创建虚拟显示器
-        virtualDisplay = VirtualDisplayManager.createVirtualDisplay(args, surface!!)
-
-        if (virtualDisplay != null) {
-            displayId = virtualDisplay!!.display.displayId
-            isRunning = true
-            Log.d(TAG, "Virtual display created: displayId=$displayId, ${args.width}x${args.height}@${args.refreshRate}Hz, ${args.dpi}dpi (awaiting GL thread)")
-
-            // 6. 绑定输入设备
-            InputRouter.bindAllExternalInputToDisplay(displayId)
-
-            // 7. 启用音频路由 (默认路由到内置扬声器)
-            audioRouter.enableRouting(AudioDeviceInfo.TYPE_BUILTIN_SPEAKER)
-            audioRouter.startPlaybackMonitoring(displayId)
-
-            // 8. 等待 GL 线程就绪，创建真实纹理并绑定
-            val deferred = CompletableDeferred<Boolean>()
-            onGlThreadReady = { texId ->
-                glTextureId = texId
-                // 绑定 SurfaceTexture 到真实 GL 纹理
-                surfaceTexture?.attachToGLContext(glTextureId)
-                deferred.complete(true)
-            }
-
-            // 设置超时保护
-            CoroutineScope(Dispatchers.IO).launch {
-                try {
-                    val success = deferred.await()
-                    onReady(success)
-                } catch (e: Exception) {
-                    Log.e(TAG, "GL thread binding failed", e)
-                    cleanup()
-                    onReady(false)
-                }
-            }
-        } else {
-            Log.e(TAG, "Failed to create virtual display")
+        virtualDisplay = VirtualDisplayManager.createVirtualDisplay(args, surface!!, mediaProjection)
+        val vd = virtualDisplay
+        if (vd == null) {
+            Log.e(TAG, "Failed to create virtual display (MediaProjection consent missing?)")
             cleanup()
             onReady(false)
+            return@launch
         }
+
+        displayId = vd.display.displayId
+        isRunning = true
+        VrVirtualDisplayHost.shared = this@VrVirtualDisplayHost
+        Log.d(
+            TAG,
+            "Virtual display created: id=$displayId, ${args.width}x${args.height}@${args.dpi}dpi"
+        )
+
+        InputRouter.bindAllExternalInputToDisplay(displayId)
+        audioRouter.enableRouting(AudioDeviceInfo.TYPE_BUILTIN_SPEAKER)
+        audioRouter.startPlaybackMonitoring(displayId)
+
+        onReady(true)
     }
 
-    /** 停止并清理虚拟显示器 */
     fun stop() {
         Log.d(TAG, "Stopping virtual display host")
         audioRouter.stopPlaybackMonitoring()
         audioRouter.disableRouting()
-        virtualDisplay?.release()
+        try {
+            virtualDisplay?.release()
+        } catch (e: Exception) {
+            Log.w(TAG, "release virtual display failed", e)
+        }
         cleanup()
+        if (shared === this) shared = null
     }
 
     private fun cleanup() {
@@ -138,40 +133,51 @@ class VrVirtualDisplayHost(private val context: Context) {
         surfaceTexture?.release()
         surfaceTexture = null
         onGlThreadReady = null
-        if (glTextureId != 0) {
-            // 纹理删除需在 GL 线程，这里只重置 ID，实际删除由渲染器处理
-            glTextureId = 0
-        }
+        glTextureId = 0
         displayId = -1
         isRunning = false
     }
 
-    /** 在虚拟显示器上启动应用 */
     fun launchApp(packageName: String) {
         if (displayId > 0) {
             AppLauncher(context).launchPackage(packageName, displayId)
+        } else {
+            Log.w(TAG, "No virtual display to launch on")
         }
     }
 
-    /** 由 GL 线程调用：创建 GL_TEXTURE_EXTERNAL_OES 纹理并返回 ID */
+    /**
+     * 由 GL 线程调用：创建 GL_TEXTURE_EXTERNAL_OES 纹理并把
+     * 虚拟显示器的 SurfaceTexture 绑定到它（帧才会流进纹理）。
+     */
     fun createGlTextureOnGlThread(): Int {
         val textures = IntArray(1)
         GLES20.glGenTextures(1, textures, 0)
         val texId = textures[0]
         GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, texId)
-        GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR)
-        GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR)
-        GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE)
-        GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE)
+        GLES20.glTexParameteri(
+            GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR
+        )
+        GLES20.glTexParameteri(
+            GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR
+        )
+        GLES20.glTexParameteri(
+            GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE
+        )
+        GLES20.glTexParameteri(
+            GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE
+        )
+        glTextureId = texId
+        try {
+            surfaceTexture?.attachToGLContext(texId)
+            Log.d(TAG, "SurfaceTexture attached to GL texture $texId")
+        } catch (e: Exception) {
+            Log.e(TAG, "attachToGLContext failed", e)
+        }
         return texId
     }
 
-    /** 获取 SurfaceTexture 供渲染器更新 */
     fun getSurfaceTexture(): SurfaceTexture? = surfaceTexture
-
-    /** 获取 Surface 供 MediaCodec 等使用 */
     fun getSurface(): Surface? = surface
-    
-    /** 获取当前显示参数 */
     fun getDisplayArgs(): VirtualDisplayManager.VirtualDisplayArgs = args
 }

@@ -1,194 +1,186 @@
-# VR2DAppLauncher - Shizuku 虚拟显示器 VR 演示应用
+# VR2DAppLauncher
 
-## 项目概述
-这是一个独立的 Android 应用，演示如何使用 **Shizuku** 创建虚拟显示器，在 VR (Google Cardboard) 中观看和操作普通 2D 应用。
+把普通 2D Android 应用投放到 Google Cardboard VR 界面中观看与操作 —— 一个**独立的新项目**（不是 OpenNOW-VR 仓库的修改），当前处于**技术验证阶段**：先保证云端能稳定编译出可安装的 APK，再逐步补齐能力。
 
-## 核心功能
-1. **Shizuku 权限管理** - 检查/请求权限
-2. **虚拟显示器创建** - 可配置分辨率/刷新率/DPI，双路径（Shizuku 优先 + MediaProjection 回退）
-3. **应用启动** - 在虚拟显示器上启动 Chrome/YouTube/浏览器/自定义包名
-4. **输入路由** - 外部手柄/键盘/鼠标自动绑定到虚拟显示器，支持 `dumpsys input` 解析
-5. **VR 观看模式** - Cardboard SDK 立体渲染，头部追踪
-6. **VR 设置菜单** - 完整的画面调整、屏幕几何、舒适度配置
+## 1. 当前实现架构（请先读这一节）
 
-## 目录结构
+```
+用户点"创建虚拟显示器"
+  → MediaProjectionManager.createScreenCaptureIntent() 弹出系统授权
+  → MediaProjection.createVirtualDisplay(..., Surface)
+  → Surface 来自 SurfaceTexture，绑定为 GL_TEXTURE_EXTERNAL_OES
+  → CardboardView 左右眼采样这张纹理（零 Bitmap 拷贝）
+  → 手机放入 Cardboard 观看
+```
+
+- **虚拟显示器**：使用 **公开 Android API**（`MediaProjection.createVirtualDisplay`）。标准 SDK 可编译、无需 root、无需 framework hidden API。
+- **Shizuku**：**可选增强**，不再是创建虚拟显示器的前置条件。已接入的部分：
+  - `Shizuku.pingBinder()` / `checkSelfPermission()` / `requestPermission(int)` 权限检测；
+  - `SystemServiceHelper.getSystemService()` + `ShizukuBinderWrapper` 取得 `display` / `input` / `activity` / `window` / `package` / `audio` 等系统服务 Binder；
+  - `Shizuku.newProcess()` 执行 `dumpsys input` 解析、`input -d <displayId> tap/keyevent` 注入、`am start --display <id>` 在指定 display 启动应用。
+- **应用启动**：公开 API `ActivityOptions.setLaunchDisplayId(displayId)` 为主，Shizuku shell 作为增强尝试。
+- **多窗口**：`WindowManager` 维护窗口 id / bounds / Z-order / 焦点 / 最小化 / 最大化 / 可见性，`VrWindowRenderer` 在 VR 中绘制窗口边框、标题栏与控制按钮。
+
+### ⚠️ 尚未实现（不要照着旧版 README 理解）
+
+反编译 `屏连 1.2.7` / `屏易连 1.6.3` 确认它们用的是 **framework hidden API**：
+
+- `IDisplayManager.createVirtualDisplay()` + `VirtualDisplayConfig.Builder`（真正"独立的、能承载任意 Activity 的"虚拟显示器）
+- `IInputManager.addUniqueIdAssociationByDescriptor()` / `addPortAssociation()`（把外部手柄/键盘物理绑定到该显示器）
+
+这些类**不在标准 Android SDK 中**，直接 import 会让 Kotlin 编译期报 `Unresolved reference`。本版本刻意没有引入 hidden API stub / AIDL transact / 反射桥，因此：
+
+- 当前 `MediaProjection` 路径显示的是**主屏镜像**；在虚拟显示器上启动应用的行为与"真·独立虚拟屏多窗口"存在语义差距。
+- 外部输入设备的**物理绑定**尚未实现；`InputRouter` 目前只做 `dumpsys input` 解析与 shell 注入（尽力而为）。
+- `AudioRouter` 目前只是输出设备枚举的 stub。
+
+以上是下一阶段的主要工作，需要在编译期引入 hidden API stub（或 AIDL 生成的 Binder transact），并保证不破坏标准 SDK 可编译性。
+
+## 2. 功能清单
+
+| 功能 | 状态 |
+|---|---|
+| Shizuku 权限检测 / 请求 | ✅ |
+| MediaProjection 授权 + 虚拟显示器创建 / 销毁 | ✅ |
+| 虚拟显示器分辨率 / DPI / 刷新率可配置 | ✅ |
+| 在指定 display 启动应用（Chrome / YouTube / 浏览器 / 自定义包名） | ✅ |
+| Cardboard SDK 立体渲染 + 头部姿态 | ✅ |
+| 多窗口数据模型（移动 / 缩放 / 最小化 / 最大化 / 焦点 / Z-order） | ✅ |
+| VR 中窗口边框 / 标题栏 / 控制按钮渲染 | ✅ |
+| VR 设置界面（亮度 / 对比度 / 饱和度 / 渐晕 / 色差 / 屏幕几何 / 瞳距 / 虚拟屏参数） | ✅ |
+| 手柄 / 键盘输入路由到虚拟显示器 | ⚠️ 仅 shell 注入，物理绑定未实现 |
+| 按虚拟显示器隔离音频 | ❌ stub |
+| Hidden API 独立虚拟屏（真·多窗口） | ❌ 下一阶段 |
+
+## 3. 交互方式
+
+**2D 主界面**（`MainActivity`）
+
+| 操作 | 效果 |
+|---|---|
+| 点「创建虚拟显示器」 | 弹出系统"开始录制/投射"授权；同意后建立虚拟屏 |
+| 点「启动 Chrome / YouTube / 浏览器 / 自定义包名」 | 在虚拟屏上启动对应应用 |
+| 点「进入 VR 模式」 | 打开 `VrActivity`，把手机放入 Cardboard |
+| 点「VR 设置」 | 打开设置页 |
+| 点「销毁虚拟显示器」 | 释放 `VirtualDisplay` 与 `MediaProjection` |
+
+**VR 模式**（`VrActivity`）
+
+| 输入 | 效果 |
+|---|---|
+| 返回键 / MENU 键 | 退出 VR 回到 2D 界面（虚拟显示器继续运行） |
+| 单击 | 选中当前焦点窗口 |
+| 双击 | 最大化 / 还原选中窗口 |
+| 拖拽 | 移动选中窗口 |
+| 双击后拖拽 | 缩放选中窗口 |
+| 长按触控板 | 打开窗口菜单（最小化 / 还原） |
+| 方向键 | 在可见窗口间切换焦点 |
+| A / DPAD_CENTER | 确认 / 聚焦 |
+| 长按音量上/下键 | 打开 VR 设置 |
+
+> 头部追踪由 Cardboard SDK 自动处理；渲染遵循 SDK 的共享 FBO 规则（`onDrawEye` 内不做 `glClear`，否则画右眼时会擦掉左眼）。
+
+## 4. 构建方式（只用 GitHub Actions，不在本机编译）
+
+本项目**不在本地编译**。推送到 `main` / `master`（或手动 `workflow_dispatch`）即触发 `.github/workflows/build.yml`：
+
+1. 检出 `VR2DAppLauncher` 与 `googlevr/cardboard@v1.36.0` 源码；
+2. **JDK 21** 下 `:sdk:assembleRelease` 从源码构建 Cardboard SDK AAR（其 `sdk/build.gradle` 用 AGP 9.2.0 / compileSdk 35 / NDK 29.0.14206865，且 `java.srcDirs` 包含 `../java_api/src/main/java`，所以 AAR 内含 `CardboardView` 等类）；
+3. 用 `find` 定位实际 AAR 输出名并复制为 `app/libs/cardboard-sdk.aar`（不硬编码 `sdk-release.aar`）；
+4. 切到 **JDK 17**，执行 `./gradlew assembleDebug --no-daemon --stacktrace`（app 用 AGP 8.7.2 / Gradle 8.9 / Kotlin 2.0.21，Java 与 Kotlin target 均为 17）；
+5. **断言 APK 真的产出**：文件存在、体积 > 100 KB、包含 `classes*.dex` 与 `AndroidManifest.xml`，并打印 Kotlin 编译出的 `.class` 数量；
+6. 上传 `app-debug.apk` 为 Artifact（保留 30 天）；失败时上传构建报告与日志。
+
+版本链（已核验）：
+
+| 组件 | 版本 |
+|---|---|
+| Gradle Wrapper | 8.9（官方 `gradlew` + 官方 `gradle-wrapper.jar`） |
+| Android Gradle Plugin | 8.7.2 |
+| Kotlin Android | 2.0.21 |
+| compileSdk / minSdk / targetSdk | 35 / 26 / 33 |
+| JDK | 21（构建 Cardboard SDK）/ 17（构建 app） |
+| Cardboard SDK | v1.36.0（CI 从源码构建） |
+| Shizuku | `dev.rikka.shizuku:api:13.1.5` + `provider:13.1.5` |
+
+> `moe.shizuku:api:13.5.3` / `manager:13.5.3` / `dev.rikka.tools.refine:refine:2.2.0` 这些坐标在 Maven Central 上不存在，早期版本误用已全部移除。
+
+## 5. 设备要求与使用流程
+
+- Android 8.0+（**API 26+**，由 Cardboard SDK AAR 的 minSdk 决定）
+- Google Cardboard 眼镜或同类 VR 盒子
+- （可选）Shizuku Manager，通过 ADB 激活后可获得增强能力；**不装也能创建虚拟显示器**
+- （可选）USB / 蓝牙手柄、键盘、鼠标
+
+1. 安装 CI 产出的 `app-debug.apk`
+2. 打开应用 → 点「创建虚拟显示器」→ 在系统弹窗中同意屏幕捕获
+3. 点应用按钮在虚拟屏上启动应用
+4. 点「VR 设置」按需调整画面参数（改虚拟屏分辨率/DPI 需销毁后重建）
+5. 点「进入 VR 模式」并放入 Cardboard
+
+## 6. 依赖（`app/build.gradle.kts`）
+
+```kotlin
+implementation(files("libs/cardboard-sdk.aar"))          // CI 从源码构建
+implementation("com.google.android.gms:play-services-vision:20.1.3")
+implementation("com.google.protobuf:protobuf-javalite:3.19.4")
+implementation("org.jspecify:jspecify:1.0.0")           // 以上为 flat AAR 的传递依赖，需显式补齐
+implementation("dev.rikka.shizuku:api:13.1.5")
+implementation("dev.rikka.shizuku:provider:13.1.5")
+implementation("androidx.core:core-ktx:1.13.1")
+implementation("androidx.appcompat:appcompat:1.7.0")
+implementation("androidx.constraintlayout:constraintlayout:2.1.4")
+implementation("androidx.recyclerview:recyclerview:1.3.2")
+implementation("com.google.android.material:material:1.12.0")
+implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
+```
+
+`api:13.1.5` 的 POM 会传递引入 `dev.rikka.shizuku:aidl:13.1.5` 与 `shared:13.1.5`，无需手动声明。
+
+## 7. 目录结构
+
 ```
 VR2DAppLauncher/
+├── .github/workflows/build.yml          # GitHub Actions 云端编译
 ├── app/
-│   ├── src/main/
-│   │   ├── java/com/vr2dapplauncher/
-│   │   │   ├── VR2DApp.kt                    # Application 入口
-│   │   │   ├── ui/
-│   │   │   │   ├── MainActivity.kt           # 2D 启动器界面
-│   │   │   │   └── VrSettingsActivity.kt     # VR 设置界面
-│   │   │   ├── vr/
-│   │   │   │   ├── VrActivity.kt             # VR 模式 Activity
-│   │   │   │   ├── VrRenderer.kt             # Cardboard 渲染器 (带画面调整着色器)
-│   │   │   │   └── VrSettings.kt             # VR 设置数据类
-│   │   │   └── shizuku/
-│   │   │       ├── ShizukuUtils.kt           # 权限工具
-│   │   │       ├── ShizukuServiceUtils.kt    # 系统服务获取
-│   │   │       ├── VirtualDisplayManager.kt  # 虚拟显示器创建
-│   │   │       ├── InputRouter.kt            # 输入设备绑定 (含 dumpsys 解析)
-│   │   │       ├── AppLauncher.kt            # 应用启动
-│   │   │       ├── VrVirtualDisplayHost.kt   # VR 宿主
-│   │   │       └── MediaProjectionService.kt # 回退路径
-│   │   ├── res/
-│   │   │   ├── layout/
-│   │   │   │   ├── activity_main.xml         # 主界面
-│   │   │   │   ├── activity_vr.xml           # VR 界面
-│   │   │   │   ├── activity_vr_settings.xml  # VR 设置界面
-│   │   │   │   ├── item_settings_header.xml  # 设置分组标题
-│   │   │   │   └── item_settings_seekbar.xml # 设置滑块项
-│   │   │   └── values/
-│   │   │       ├── strings.xml
-│   │   │       ├── colors.xml
-│   │   │       └── themes.xml
-│   │   └── AndroidManifest.xml
 │   ├── build.gradle.kts
-│   └── proguard-rules.pro
-├── build.gradle.kts
-├── settings.gradle.kts
-├── gradlew / gradlew.bat
-└── gradle/wrapper/
+│   ├── proguard-rules.pro
+│   ├── libs/cardboard-sdk.aar           # CI 生成（.gitignore 忽略）
+│   └── src/main/
+│       ├── AndroidManifest.xml
+│       ├── java/com/vr2dapplauncher/
+│       │   ├── VR2DApp.kt
+│       │   ├── ui/
+│       │   │   ├── MainActivity.kt             # 2D 启动器 + MediaProjection 授权
+│       │   │   └── VrSettingsActivity.kt       # VR 设置
+│       │   ├── vr/
+│       │   │   ├── VrActivity.kt               # VR 模式与交互
+│       │   │   ├── VrRenderer.kt               # 单窗口 GL 渲染器（兼容保留）
+│       │   │   ├── VrWindowRenderer.kt         # 多窗口 GL 渲染器（主路径）
+│       │   │   ├── WindowManager.kt            # 多窗口状态机
+│       │   │   └── VrSettings.kt               # 设置持久化
+│       │   └── shizuku/
+│       │       ├── ShizukuUtils.kt             # 权限 / shell
+│       │       ├── ShizukuServiceUtils.kt      # 系统服务 Binder
+│       │       ├── VirtualDisplayManager.kt    # 虚拟显示器（公开 API）
+│       │       ├── InputRouter.kt              # 输入解析 / 注入
+│       │       ├── AppLauncher.kt              # 指定 display 启动
+│       │       ├── AudioRouter.kt              # 音频路由 stub
+│       │       └── VrVirtualDisplayHost.kt     # 生命周期 + SurfaceTexture 桥接
+│       └── res/{layout,values,mipmap-*}
+├── build.gradle.kts / settings.gradle.kts / gradle.properties
+├── gradlew / gradlew.bat / gradle/wrapper/
+└── .gitignore
 ```
 
-## 依赖要求
-在 `app/build.gradle.kts` 中已声明：
-- **Shizuku**: `moe.shizuku:api:13.5.3`, `moe.shizuku:manager:13.5.3`
-- **Refine**: `dev.rikka.tools.refine:refine:2.2.0` (用于 unsafeCast)
-- **Google Cardboard SDK**: `implementation(files("libs/cardboard-sdk.aar"))` - **CI 自动从源码构建**
+## 8. 常见问题
 
-## 必须手动准备的文件 (本地构建时)
+- **Q：CI 几十秒就结束了，是不是没编译？** A：看 `Verify Debug APK was really produced` 步骤。它会打印 APK 字节数、APK 内文件清单、`classes*.dex` 与 Kotlin `.class` 数量；缺任何一项都会让 job 变红。
+- **Q：虚拟显示器创建失败？** A：必须同意系统屏幕捕获授权；`MediaProjection` 为 null 时 `VirtualDisplayManager` 会直接返回 null（日志有明确提示）。
+- **Q：VR 里黑屏？** A：确认 `app/libs/cardboard-sdk.aar` 是 CI 从 `googlevr/cardboard@v1.36.0` 构建的真 AAR（不是占位文件），且 fragment shader 首行是 `#extension GL_OES_EGL_image_external : require`。
+- **Q：Shizuku 显示未授权？** A：可选增强项，不影响虚拟显示器创建。
+- **Q：手柄控制不了应用？** A：物理输入绑定（hidden `IInputManager`）尚未实现，见第 1 节。
 
-### 1. Google Cardboard SDK AAR
-将 `cardboard-sdk.aar` (v1.36.0) 放入 `app/libs/` 目录。
+## 9. 许可证
 
-获取方式：
-- 从 [Google Cardboard SDK releases](https://developers.google.com/cardboard/develop/unity/downloads) 下载
-- 或从 OpenNOW-VR 项目的 CI 产物中获取
-- 文件名必须为 `cardboard-sdk.aar`
-
-**注意**: GitHub Actions CI 会自动从源码构建 Cardboard SDK AAR，无需手动放入。
-
-### 2. 设备准备
-- Android 7.0+ (API 24+)
-- 安装 **Shizuku Manager** (从 GitHub Releases 或酷安下载)
-- 通过 ADB 激活 Shizuku：
-  ```bash
-  adb shell sh /storage/emulated/0/Android/data/moe.shizuku.privileged.api/start.sh
-  ```
-- Google Cardboard 眼镜或同类 VR 盒子
-- (可选) USB/蓝牙手柄、键盘、鼠标
-
-## 构建步骤
-```bash
-cd VR2DAppLauncher
-
-# Linux/macOS
-./gradlew assembleDebug
-
-# Windows
-gradlew.bat assembleDebug
-
-# 输出 APK: app/build/outputs/apk/debug/app-debug.apk
-```
-
-## 使用流程
-1. 安装 APK 到设备
-2. 打开应用，检查 Shizuku 权限状态（应显示 ✅ 已授予）
-3. 点击 **"创建虚拟显示器"** - 后台创建虚拟屏幕 (默认 1920×1080@60Hz)
-4. 点击 **"启动 Chrome (VR)"** / **"启动 YouTube (VR)"** / **"启动 浏览器 (VR)"** - 对应应用在虚拟显示器上启动
-5. 点击 **"VR 设置"** 调整画面参数 (亮度/对比度/饱和度/角渐晕/色差/屏幕几何/瞳距等)
-6. 将手机放入 Cardboard，点击 **"进入 VR 模式"**
-7. 在 VR 中观看应用画面，手柄/键盘输入自动路由到虚拟显示器
-
-## 控制说明
-- **头部追踪**: Cardboard SDK 自动处理
-- **手柄/键盘**: 通过 InputRouter 自动绑定到虚拟显示器
-- **返回键/菜单键**: 退出 VR 模式回到 2D 界面
-- **长按 HOME/电源键**: 系统级返回，也会退出 VR
-- **VR 设置**: 主界面点击 "VR 设置" 按钮，或在 VR 模式下长按音量键 (待实现)
-
-## VR 设置详解
-
-### 屏幕几何参数 (影响 VR 中虚拟屏幕大小/距离)
-- **屏幕距离** (0.02~0.2m): 眼睛到虚拟屏幕的距离，越近视野越大
-- **屏幕宽度** (0.1~0.5m): 虚拟屏幕物理宽度
-- **屏幕高度** (0.05~0.3m): 虚拟屏幕物理高度
-- **屏幕曲率** (-1.0~1.0): 正值=凸面(桶形)，负值=凹面(枕形)，模拟曲面屏效果
-
-### 画面调整
-- **亮度** (0.1~2.0): 整体亮度倍数
-- **对比度** (0.1~2.0): 对比度倍数
-- **饱和度** (0.1~2.0): 色彩饱和度倍数
-- **角渐晕** (0.0~1.0): 边缘变暗强度，模拟透镜边缘光学效果
-- **色差校正** (-1.0~1.0): 正值=红外扩散/蓝内聚，负值相反，校正透镜色散
-
-### 头部姿态校正 (修正安装偏差)
-- **瞳距 (IPD)** (0.05~0.08m): 双眼间距，影响立体感强度
-- **偏航角偏移** (-180~180°): 左右旋转偏移校正
-- **俯仰角偏移** (-90~90°): 上下旋转偏移校正
-- **翻滚角偏移** (-180~180°): 倾斜旋转偏移校正
-
-### 虚拟显示器配置 (需重建虚拟显示器生效)
-- **宽度** (720~3840): 虚拟显示器宽度 (像素)
-- **高度** (480~2160): 虚拟显示器高度 (像素)
-- **DPI** (120~640): 虚拟显示器像素密度
-- **刷新率** (30~120): 虚拟显示器刷新率 (Hz)
-
-## 技术要点
-
-### 零拷贝渲染管线
-```
-虚拟显示器 → SurfaceTexture (GL_TEXTURE_EXTERNAL_OES) 
-    → VrRenderer.onNewFrame.updateTexImage() 
-    → CardboardView 左右眼立体渲染
-```
-视频流从未经过 Bitmap 或二次渲染目标，直接在 GL 线程采样。
-
-### 虚拟显示器双路径创建
-1. **Shizuku 路径** (优先): `IDisplayManager.createVirtualDisplay()` - 无需用户弹窗
-2. **MediaProjection 路径** (回退): `MediaProjection.createVirtualDisplay()` - 需用户授权
-
-### 输入路由三重策略
-1. `addUniqueIdAssociationByDescriptor()` - 按设备描述符绑定 (最常用，屏连/屏易连主用)
-2. `addUniqueIdAssociation()` - 按 uniqueId 绑定 (需解析 dumpsys input)
-3. `addPortAssociation()` - 按物理端口绑定 (HDMI/DP)
-
-### 着色器增强 (VrRenderer)
-- 亮度/对比度/饱和度实时调节
-- 角渐晕效果 (模拟透镜边缘光学)
-- 色差校正 (RGB 通道分别采样偏移)
-- 屏幕曲面投影 (桶形/枕形畸变模拟)
-- 所有调整在片段着色器中完成，零 CPU 开销
-
-## 常见问题
-
-### Q: Shizuku 权限显示未授予
-A: 确保已安装 Shizuku Manager 并通过 ADB 激活。部分设备重启后需要重新激活。
-
-### Q: 虚拟显示器创建失败
-A: 检查 logcat，常见原因：
-- Shizuku 版本过旧 (需 v13.5+)
-- 设备不支持虚拟显示器 (极少见)
-- 权限不足 (尝试 MediaProjection 回退)
-
-### Q: VR 模式画面黑屏
-A: 确保 Cardboard SDK AAR 正确放入 `app/libs/`，且版本为 v1.36.0。CI 构建会自动处理。
-
-### Q: 手柄无法控制虚拟显示器应用
-A: 确保手柄已通过 USB/蓝牙连接，且在 Android 设置中显示为外部输入设备。可在 VR 设置中查看绑定日志。
-
-### Q: 画面参数调整后不生效
-A: 画面调整参数 (亮度/对比度/饱和度/角渐晕/色差) 实时生效。屏幕几何参数和虚拟显示器配置需要重新创建虚拟显示器或重启 VR 模式。
-
-## GitHub Actions CI/CD
-- 每次推送到 main/master 分支自动触发构建
-- 自动从源码构建 Cardboard SDK v1.36.0 AAR
-- 构建 Debug APK 并上传为 Artifact (保留 30 天)
-- 打 Tag (v*) 时额外构建 Release APK (保留 90 天)
-- 构建失败时自动上传日志
-
-## 许可证
 Apache 2.0

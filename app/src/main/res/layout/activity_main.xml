@@ -149,7 +149,7 @@
     <TextView
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:text="使用说明:\n1. 确保已安装 Shizuku Manager 并通过 ADB 激活\n2. 点击"创建虚拟显示器"建立虚拟屏幕\n3. 点击应用按钮在虚拟显示器上启动应用\n4. 点击"进入 VR 模式"放入 Cardboard 观看\n5. 手柄/键盘输入自动路由到虚拟显示器"
+        android:text="使用说明:\n1. 确保已安装 Shizuku Manager 并通过 ADB 激活\n2. 点击'创建虚拟显示器'建立虚拟屏幕\n3. 点击应用按钮在虚拟显示器上启动应用\n4. 点击'进入 VR 模式'放入 Cardboard 观看\n5. 手柄/键盘输入自动路由到虚拟显示器"
         android:textSize="12sp"
         android:textColor="#888888"
         android:lineSpacingMultiplier="1.3"

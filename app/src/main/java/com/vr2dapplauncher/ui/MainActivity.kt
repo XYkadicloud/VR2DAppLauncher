@@ -1,8 +1,10 @@
 package com.vr2dapplauncher.ui
 
 import android.app.Activity
-import android.content.DialogInterface
+import android.content.Context
 import android.content.Intent
+import android.media.projection.MediaProjection
+import android.media.projection.MediaProjectionManager
 import android.os.Bundle
 import android.util.Log
 import android.widget.Button
@@ -12,10 +14,7 @@ import android.widget.Toast
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import com.vr2dapplauncher.R
-import com.vr2dapplauncher.shizuku.AppLauncher
-import com.vr2dapplauncher.shizuku.InputRouter
 import com.vr2dapplauncher.shizuku.ShizukuUtils
-import com.vr2dapplauncher.shizuku.VirtualDisplayManager
 import com.vr2dapplauncher.shizuku.VrVirtualDisplayHost
 import com.vr2dapplauncher.vr.VrActivity
 import kotlinx.coroutines.CoroutineScope
@@ -24,15 +23,20 @@ import kotlinx.coroutines.launch
 
 /**
  * 主 Activity：2D 启动器界面
- * 功能：
- * 1. Shizuku 权限检查与请求
- * 2. 虚拟显示器创建/销毁
- * 3. 在虚拟显示器上启动应用
- * 4. 进入 VR 模式
+ *
+ * 全量审查修正（技术验证阶段的关键闭环）：
+ *  - 创建虚拟显示器前先走 MediaProjection 用户授权，把拿到的 MediaProjection
+ *    传给 VrVirtualDisplayHost；否则 VirtualDisplayManager 直接返回 null，
+ *    "创建虚拟显示器"永远失败；
+ *  - Shizuku 改为可选增强（用于 am start --display / 输入路由），
+ *    不再作为创建虚拟显示器的硬前置条件。
  */
 class MainActivity : AppCompatActivity() {
 
-    private const val TAG = "MainActivity"
+    companion object {
+        private const val TAG = "MainActivity"
+        private const val REQUEST_MEDIA_PROJECTION = 1002
+    }
 
     // UI 组件
     private lateinit var tvShizukuStatus: TextView
@@ -46,12 +50,17 @@ class MainActivity : AppCompatActivity() {
     private lateinit var btnEnterVr: Button
     private lateinit var btnVrSettings: Button
 
-    // 虚拟显示器宿主
+    // 虚拟显示器宿主 / 屏幕捕获授权
     private var virtualDisplayHost: VrVirtualDisplayHost? = null
+    private var mediaProjection: MediaProjection? = null
+    private lateinit var mediaProjectionManager: MediaProjectionManager
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
+
+        mediaProjectionManager =
+            getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
 
         initViews()
         setupClickListeners()
@@ -70,76 +79,89 @@ class MainActivity : AppCompatActivity() {
         btnEnterVr = findViewById(R.id.btn_enter_vr)
         btnVrSettings = findViewById(R.id.btn_vr_settings)
 
-        // 初始状态：虚拟显示器未创建时禁用相关按钮
         setAppButtonsEnabled(false)
         btnDestroyVd.isEnabled = false
         btnEnterVr.isEnabled = false
+        btnCreateVd.isEnabled = true
     }
 
     private fun setupClickListeners() {
-        // 创建虚拟显示器
         btnCreateVd.setOnClickListener { createVirtualDisplay() }
-
-        // 销毁虚拟显示器
         btnDestroyVd.setOnClickListener { destroyVirtualDisplay() }
-
-        // 启动 Chrome
         btnChrome.setOnClickListener { launchApp("com.android.chrome") }
-
-        // 启动 YouTube
         btnYouTube.setOnClickListener { launchApp("com.google.android.youtube") }
-
-        // 启动浏览器
         btnBrowser.setOnClickListener { launchApp("com.android.browser") }
-
-        // 自定义包名
         btnCustom.setOnClickListener { showCustomPackageDialog() }
-
-        // 进入 VR 模式
         btnEnterVr.setOnClickListener { enterVrMode() }
-
-        // VR 设置
         btnVrSettings.setOnClickListener { openVrSettings() }
     }
 
-    /** 检查 Shizuku 权限 */
+    /** 检查 Shizuku 权限（增强项，不阻塞虚拟显示器） */
     private fun checkShizukuPermission() {
         CoroutineScope(Dispatchers.IO).launch {
             val hasPermission = ShizukuUtils.hasPermission()
-            runOnUiThread {
-                updateShizukuStatus(hasPermission)
-                if (!hasPermission) {
-                    ShizukuUtils.requestPermission(this@MainActivity)
-                }
-            }
+            runOnUiThread { updateShizukuStatus(hasPermission) }
         }
     }
 
     private fun updateShizukuStatus(hasPermission: Boolean) {
         if (hasPermission) {
-            tvShizukuStatus.text = "✅ Shizuku 权限已授予"
+            tvShizukuStatus.text = "✅ Shizuku 权限已授予（增强：指定 display 启动 / 输入路由）"
             tvShizukuStatus.setTextColor(0xFF88CC88.toInt())
-            btnCreateVd.isEnabled = true
         } else {
-            tvShizukuStatus.text = "❌ Shizuku 权限未授予\n请安装 Shizuku Manager 并通过 ADB 激活"
-            tvShizukuStatus.setTextColor(0xFFFF6666.toInt())
-            btnCreateVd.isEnabled = false
+            tvShizukuStatus.text = "ℹ️ Shizuku 未授权（可选，虚拟显示器仍可用）\n如需增强能力，请安装 Shizuku 并授权"
+            tvShizukuStatus.setTextColor(0xFFAAAAAA.toInt())
         }
+        // MediaProjection 不依赖 Shizuku，创建按钮始终可用
+        btnCreateVd.isEnabled = true
     }
 
-    /** 创建虚拟显示器 */
+    /** 创建虚拟显示器：先请求屏幕捕获授权 */
     private fun createVirtualDisplay() {
-        if (!ShizukuUtils.hasPermission()) {
-            Toast.makeText(this, "请先授予 Shizuku 权限", Toast.LENGTH_SHORT).show()
-            ShizukuUtils.requestPermission(this)
+        if (virtualDisplayHost?.isRunning == true) {
+            Toast.makeText(this, "虚拟显示器已在运行", Toast.LENGTH_SHORT).show()
             return
         }
 
+        tvVdStatus.text = "正在请求屏幕捕获授权..."
+        tvVdStatus.setTextColor(0xFFFFAA00.toInt())
         btnCreateVd.isEnabled = false
+
+        @Suppress("DEPRECATION")
+        startActivityForResult(
+            mediaProjectionManager.createScreenCaptureIntent(),
+            REQUEST_MEDIA_PROJECTION
+        )
+    }
+
+    @Suppress("DEPRECATION")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode != REQUEST_MEDIA_PROJECTION) return
+
+        if (resultCode != Activity.RESULT_OK || data == null) {
+            btnCreateVd.isEnabled = true
+            tvVdStatus.text = "虚拟显示器: 未创建（屏幕捕获授权被取消）"
+            tvVdStatus.setTextColor(0xFFFF6666.toInt())
+            Toast.makeText(this, "已取消屏幕捕获授权", Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        mediaProjection = mediaProjectionManager.getMediaProjection(resultCode, data)
+        if (mediaProjection == null) {
+            btnCreateVd.isEnabled = true
+            tvVdStatus.text = "❌ 无法获取 MediaProjection"
+            tvVdStatus.setTextColor(0xFFFF6666.toInt())
+            return
+        }
+        reallyCreateVirtualDisplay()
+    }
+
+    private fun reallyCreateVirtualDisplay() {
         tvVdStatus.text = "正在创建虚拟显示器..."
         tvVdStatus.setTextColor(0xFFFFAA00.toInt())
 
-        virtualDisplayHost = VrVirtualDisplayHost(this)
+        virtualDisplayHost = VrVirtualDisplayHost(this, mediaProjection)
         virtualDisplayHost?.start { success ->
             runOnUiThread {
                 if (success) {
@@ -151,7 +173,7 @@ class MainActivity : AppCompatActivity() {
                     btnCreateVd.isEnabled = false
                     Toast.makeText(this, "虚拟显示器创建成功", Toast.LENGTH_SHORT).show()
                 } else {
-                    tvVdStatus.text = "❌ 虚拟显示器创建失败"
+                    tvVdStatus.text = "❌ 虚拟显示器创建失败（检查日志）"
                     tvVdStatus.setTextColor(0xFFFF6666.toInt())
                     btnCreateVd.isEnabled = true
                     virtualDisplayHost = null
@@ -165,6 +187,12 @@ class MainActivity : AppCompatActivity() {
     private fun destroyVirtualDisplay() {
         virtualDisplayHost?.stop()
         virtualDisplayHost = null
+        try {
+            mediaProjection?.stop()
+        } catch (e: Exception) {
+            Log.w(TAG, "stop MediaProjection failed", e)
+        }
+        mediaProjection = null
         tvVdStatus.text = "虚拟显示器: 未创建"
         tvVdStatus.setTextColor(0xFFAAAAAA.toInt())
         setAppButtonsEnabled(false)
@@ -190,9 +218,7 @@ class MainActivity : AppCompatActivity() {
             .setView(input)
             .setPositiveButton("启动") { _, _ ->
                 val packageName = input.text.toString().trim()
-                if (packageName.isNotEmpty()) {
-                    launchApp(packageName)
-                }
+                if (packageName.isNotEmpty()) launchApp(packageName)
             }
             .setNegativeButton("取消", null)
             .show()
@@ -205,9 +231,7 @@ class MainActivity : AppCompatActivity() {
             Toast.makeText(this, "虚拟显示器未运行", Toast.LENGTH_SHORT).show()
             return
         }
-
-        val intent = VrActivity.createIntent(this, host)
-        startActivity(intent)
+        startActivity(VrActivity.createIntent(this, host.displayId))
     }
 
     private fun setAppButtonsEnabled(enabled: Boolean) {
@@ -219,18 +243,21 @@ class MainActivity : AppCompatActivity() {
 
     /** 打开 VR 设置 */
     private fun openVrSettings() {
-        val intent = VrSettingsActivity.createIntent(this)
-        startActivity(intent)
+        startActivity(VrSettingsActivity.createIntent(this))
     }
 
     override fun onResume() {
         super.onResume()
-        // 重新检查权限状态
         checkShizukuPermission()
     }
 
     override fun onDestroy() {
         super.onDestroy()
         virtualDisplayHost?.stop()
+        try {
+            mediaProjection?.stop()
+        } catch (e: Exception) {
+            Log.w(TAG, "stop MediaProjection failed", e)
+        }
     }
 }
