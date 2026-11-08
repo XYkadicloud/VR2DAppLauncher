@@ -44,12 +44,7 @@ jobs:
           cmdline-tools-version: latest
           accept-android-sdk-licenses: true
           log-accepted-android-sdk-licenses: true
-          packages: |
-            platform-tools
-            cmdline-tools;latest
-            platforms;android-35
-            build-tools;35.0.0
-            ndk;29.0.14206865
+          packages: platform-tools cmdline-tools;latest platforms;android-35 build-tools;35.0.0 ndk;29.0.14206865
 
       - name: Cache Gradle packages
         uses: actions/cache@v4
@@ -138,12 +133,7 @@ jobs:
           cmdline-tools-version: latest
           accept-android-sdk-licenses: true
           log-accepted-android-sdk-licenses: true
-          packages: |
-            platform-tools
-            cmdline-tools;latest
-            platforms;android-35
-            build-tools;35.0.0
-            ndk;29.0.14206865
+          packages: platform-tools cmdline-tools;latest platforms;android-35 build-tools;35.0.0 ndk;29.0.14206865
 
       - name: Cache Gradle packages
         uses: actions/cache@v4
