@@ -1,0 +1,40 @@
+# Gradle
+.gradle/
+build/
+*/build/
+*/build.gradle.kts.d/
+
+# IDE
+.idea/
+*.iml
+*.iws
+*.ipr
+*.classpath
+*.project
+.vscode/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Local config
+local.properties
+gradle.properties
+
+# Output
+*.apk
+*.aar
+*.jar
+*.war
+*.ear
+
+# Generated
+generated/
+*.generated.*
+
+# Logs
+*.log
+
+# Temp
+*.tmp
+*.temp
