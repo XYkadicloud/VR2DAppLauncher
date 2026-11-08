@@ -56,26 +56,62 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-gradle-
 
-      - name: Build Cardboard SDK AAR
+      # ★ 必须构建 debug 变体：googlevr/cardboard@v1.36.0 的 sdk/build.gradle 里
+      #   release { minifyEnabled true }，R8 会把 CardboardView / HeadTransform /
+      #   Viewport 这些公开 Java API 当作"库内未使用"直接削掉（run #11 实测：
+      #   release AAR 的 classes.jar 只有 34 个条目，0 个 Cardboard API 类），
+      #   导致 app 的 Kotlin 编译期整批 Unresolved reference。debug 变体不做 shrink。
+      - name: Build Cardboard SDK AAR (debug variant, no R8 shrink)
         working-directory: cardboard-sdk
         run: |
           chmod +x gradlew
-          ./gradlew :sdk:assembleRelease --no-daemon --stacktrace
+          ./gradlew :sdk:assembleDebug --no-daemon --stacktrace
           ls -la sdk/build/outputs/aar/
 
       - name: Copy Cardboard SDK AAR into app/libs
         run: |
           mkdir -p VR2DAppLauncher/app/libs
-          # 不要硬编码 sdk-release.aar：不同 AGP 版本输出名可能变化，用 find 定位
-          AAR=$(find cardboard-sdk/sdk/build/outputs/aar -name '*.aar' -type f | head -n 1)
+          AAR=$(find cardboard-sdk/sdk/build/outputs/aar -name 'sdk-debug.aar' -type f | head -n 1)
           if [ -z "$AAR" ]; then
-            echo "Cardboard SDK AAR not found; contents of outputs dir:"
+            AAR=$(find cardboard-sdk/sdk/build/outputs/aar -name '*.aar' -type f | head -n 1)
+          fi
+          if [ -z "$AAR" ]; then
+            echo "::error::Cardboard SDK AAR not found; contents of outputs dir:"
             find cardboard-sdk/sdk/build/outputs -maxdepth 3 -type f | head -40
             exit 1
           fi
           echo "Using AAR: $AAR"
           cp "$AAR" VR2DAppLauncher/app/libs/cardboard-sdk.aar
           ls -la VR2DAppLauncher/app/libs/
+
+      # 在进 app 编译之前就断言 AAR 里真有 Java API 类和 native 库，
+      # 避免再出现"CI 绿了 / 但 Kotlin 报一堆 Unresolved reference"的假象。
+      - name: Verify Cardboard SDK AAR contents
+        run: |
+          python3 - <<'PY'
+          import io, sys, zipfile
+          aar = "VR2DAppLauncher/app/libs/cardboard-sdk.aar"
+          z = zipfile.ZipFile(aar)
+          jar = zipfile.ZipFile(io.BytesIO(z.read("classes.jar")))
+          names = jar.namelist()
+          required = [
+              "com/google/cardboard/sdk/CardboardView.class",
+              "com/google/cardboard/sdk/CardboardView$Eye.class",
+              "com/google/cardboard/sdk/CardboardView$Renderer.class",
+              "com/google/cardboard/sdk/HeadTransform.class",
+              "com/google/cardboard/sdk/Viewport.class",
+          ]
+          missing = [r for r in required if r not in names]
+          if missing:
+              print("::error::Cardboard AAR missing Java API classes:", missing)
+              print("classes.jar sample:", names[:30])
+              sys.exit(1)
+          so = [n for n in z.namelist() if n.endswith(".so")]
+          if not so:
+              print("::error::Cardboard AAR has no native .so")
+              sys.exit(1)
+          print("Cardboard AAR OK: %d classes, %d native libs" % (len(names), len(so)))
+          PY
 
       # The app uses AGP 8.7.2, which is validated on JDK 17.
       - name: Setup Java 17 (app)

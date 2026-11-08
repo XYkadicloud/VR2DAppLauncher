@@ -385,10 +385,20 @@ class VrWindowRenderer(
     }
 
     private fun applyQuaternionRotation(matrix: FloatArray, q: FloatArray) {
-        val x = q[0], y = q[1], z = q[2], w = q[3]
-        val xx = x * x, yy = y * y, zz = z * z
-        val xy = x * y, xz = x * z, yz = y * z
-        val wx = w * x, wy = w * y, wz = w * z
+        // Kotlin 不支持 Java 那种 "val a = ..., b = ..." 一行多声明，必须逐个写。
+        val x = q[0]
+        val y = q[1]
+        val z = q[2]
+        val w = q[3]
+        val xx = x * x
+        val yy = y * y
+        val zz = z * z
+        val xy = x * y
+        val xz = x * z
+        val yz = y * z
+        val wx = w * x
+        val wy = w * y
+        val wz = w * z
 
         matrix[0] = 1 - 2 * (yy + zz)
         matrix[1] = 2 * (xy - wz)

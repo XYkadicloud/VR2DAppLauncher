@@ -85,11 +85,13 @@
 本项目**不在本地编译**。推送到 `main` / `master`（或手动 `workflow_dispatch`）即触发 `.github/workflows/build.yml`：
 
 1. 检出 `VR2DAppLauncher` 与 `googlevr/cardboard@v1.36.0` 源码；
-2. **JDK 21** 下 `:sdk:assembleRelease` 从源码构建 Cardboard SDK AAR（其 `sdk/build.gradle` 用 AGP 9.2.0 / compileSdk 35 / NDK 29.0.14206865，且 `java.srcDirs` 包含 `../java_api/src/main/java`，所以 AAR 内含 `CardboardView` 等类）；
-3. 用 `find` 定位实际 AAR 输出名并复制为 `app/libs/cardboard-sdk.aar`（不硬编码 `sdk-release.aar`）；
-4. 切到 **JDK 17**，执行 `./gradlew assembleDebug --no-daemon --stacktrace`（app 用 AGP 8.7.2 / Gradle 8.9 / Kotlin 2.0.21，Java 与 Kotlin target 均为 17）；
-5. **断言 APK 真的产出**：文件存在、体积 > 100 KB、包含 `classes*.dex` 与 `AndroidManifest.xml`，并打印 Kotlin 编译出的 `.class` 数量；
-6. 上传 `app-debug.apk` 为 Artifact（保留 30 天）；失败时上传构建报告与日志。
+2. **JDK 21** 下 `:sdk:assembleDebug` 从源码构建 Cardboard SDK AAR（其 `sdk/build.gradle` 用 AGP 9.2.0 / compileSdk 35 / NDK 29.0.14206865）。
+   > ⚠️ **必须构建 debug 变体，不能用 `assembleRelease`**：SDK 的 `release { minifyEnabled true }` 会让 R8 把 `CardboardView` / `HeadTransform` / `Viewport` 这些公开 Java API 当作"库内未使用"直接削掉。run #11 实测 release AAR 的 `classes.jar` 只有 34 个条目、0 个 Cardboard API 类，导致 app 的 Kotlin 编译期整批 `Unresolved reference`。debug 变体不做 shrink，Java API 完整保留。
+3. 复制 `sdk-debug.aar` 为 `app/libs/cardboard-sdk.aar`（不硬编码文件名，`find` 定位）；
+4. **`Verify Cardboard SDK AAR contents`**：在编译 app 之前断言 AAR 的 `classes.jar` 里确实含 `CardboardView` / `CardboardView$Eye` / `CardboardView$Renderer` / `HeadTransform` / `Viewport`，且 `jni/` 下有 native `.so`；缺任何一项立即红灯并打印诊断；
+5. 切到 **JDK 17**，执行 `./gradlew assembleDebug --no-daemon --stacktrace`（app 用 AGP 8.7.2 / Gradle 8.9 / Kotlin 2.0.21，Java 与 Kotlin target 均为 17）；
+6. **`Verify Debug APK was really produced`**：断言 APK 文件存在、体积 > 100 KB、包含 `classes*.dex` 与 `AndroidManifest.xml`，并打印 Kotlin 编译出的 `.class` 数量；
+7. 上传 `app-debug.apk` 为 Artifact（保留 30 天）；失败时上传构建报告与日志。
 
 版本链（已核验）：
 

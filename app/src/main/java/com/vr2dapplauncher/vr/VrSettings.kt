@@ -132,7 +132,10 @@ class VrSettings(private val context: Context) {
                 when {
                     value.toFloatOrNull() != null -> editor.putFloat(key, value.toFloat())
                     value.toIntOrNull() != null -> editor.putInt(key, value.toInt())
-                    value.toBooleanOrNull() != null -> editor.putBoolean(key, value.toBoolean())
+                    // Kotlin stdlib 没有 String.toBooleanOrNull()；直接判断字面量最稳。
+                    value.equals("true", ignoreCase = true) ||
+                        value.equals("false", ignoreCase = true) ->
+                        editor.putBoolean(key, value.toBoolean())
                     else -> editor.putString(key, value)
                 }
             }
