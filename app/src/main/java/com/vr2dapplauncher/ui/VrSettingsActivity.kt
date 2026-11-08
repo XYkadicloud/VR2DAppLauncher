@@ -2,12 +2,17 @@ package com.vr2dapplauncher.ui
 
 import android.content.Context
 import android.content.Intent
+import android.media.AudioDeviceInfo
+import android.media.AudioManager
 import android.os.Bundle
 import android.util.Log
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
+import android.widget.AdapterView
+import android.widget.ArrayAdapter
 import android.widget.SeekBar
+import android.widget.Spinner
 import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
 import androidx.recyclerview.widget.LinearLayoutManager
@@ -51,6 +56,27 @@ class VrSettingsActivity : AppCompatActivity() {
         fun createIntent(context: Context): Intent {
             return Intent(context, VrSettingsActivity::class.java)
         }
+        
+        private fun getDeviceTypeName(type: Int): String {
+            return when (type) {
+                AudioDeviceInfo.TYPE_BUILTIN_SPEAKER -> "内置扬声器"
+                AudioDeviceInfo.TYPE_WIRED_HEADSET -> "有线耳机"
+                AudioDeviceInfo.TYPE_BLUETOOTH_A2DP -> "蓝牙 A2DP"
+                AudioDeviceInfo.TYPE_BLUETOOTH_SCO -> "蓝牙 SCO"
+                AudioDeviceInfo.TYPE_USB_DEVICE -> "USB 设备"
+                AudioDeviceInfo.TYPE_HDMI -> "HDMI"
+                AudioDeviceInfo.TYPE_DOCK -> "底座"
+                AudioDeviceInfo.TYPE_FM -> "FM"
+                AudioDeviceInfo.TYPE_BUILTIN_EARPIECE -> "听筒"
+                AudioDeviceInfo.TYPE_TELEPHONY -> "通话"
+                AudioDeviceInfo.TYPE_AUX_LINE -> "AUX 线"
+                AudioDeviceInfo.TYPE_IP -> "IP"
+                AudioDeviceInfo.TYPE_BUS -> "总线"
+                AudioDeviceInfo.TYPE_USB_HEADSET -> "USB 耳机"
+                AudioDeviceInfo.TYPE_HEARING_AID -> "助听器"
+                else -> "未知 ($type)"
+            }
+        }
     }
 
     /** 设置项数据类 */
@@ -73,6 +99,13 @@ class VrSettingsActivity : AppCompatActivity() {
             val getValue: () -> Float,
             val onChanged: (Float) -> Unit
         ) : SettingItem()
+        data class SpinnerItem(
+            val title: String,
+            val summary: String,
+            val entries: List<String>,
+            val getValue: () -> Int,
+            val onChanged: (Int) -> Unit
+        ) : SettingItem()
     }
 
     /** RecyclerView 适配器 */
@@ -84,7 +117,27 @@ class VrSettingsActivity : AppCompatActivity() {
         private val items: List<SettingItem> = buildSettingsList()
 
         private fun buildSettingsList(): List<SettingItem> {
+            val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
+            val outputDevices = audioManager.getDevices(AudioManager.GET_DEVICES_OUTPUTS)
+            val deviceNames = outputDevices.map { "${it.productName} (${getDeviceTypeName(it.type)})" }
+            
             return listOf(
+                // --- 音频输出 ---
+                SettingItem.Header("音频输出设置"),
+                
+                SettingItem.SpinnerItem(
+                    "音频输出设备", "选择虚拟显示器音频路由目标",
+                    deviceNames,
+                    { 0 }, // 默认选择第一个
+                    { position -> 
+                        if (position < outputDevices.size) {
+                            val device = outputDevices[position]
+                            // 这里可以保存选择并应用到 AudioRouter
+                            Log.d(TAG, "Selected audio device: ${device.productName} (${device.id})")
+                        }
+                    }
+                ),
+
                 // --- 屏幕几何参数 ---
                 SettingItem.Header("屏幕几何参数 (影响 VR 中虚拟屏幕大小/距离)"),
                 
@@ -210,6 +263,7 @@ class VrSettingsActivity : AppCompatActivity() {
                 is SettingItem.Header -> 0
                 is SettingItem.SeekBarItem -> 1
                 is SettingItem.FloatSeekBarItem -> 2
+                is SettingItem.SpinnerItem -> 3
             }
         }
 
@@ -218,6 +272,7 @@ class VrSettingsActivity : AppCompatActivity() {
                 0 -> HeaderViewHolder(LayoutInflater.from(context).inflate(R.layout.item_settings_header, parent, false))
                 1 -> SeekBarViewHolder(LayoutInflater.from(context).inflate(R.layout.item_settings_seekbar, parent, false))
                 2 -> FloatSeekBarViewHolder(LayoutInflater.from(context).inflate(R.layout.item_settings_seekbar, parent, false))
+                3 -> SpinnerViewHolder(LayoutInflater.from(context).inflate(R.layout.item_settings_spinner, parent, false))
                 else -> throw IllegalArgumentException("Unknown view type: $viewType")
             }
         }
@@ -228,6 +283,7 @@ class VrSettingsActivity : AppCompatActivity() {
                 is HeaderViewHolder -> holder.bind(item as SettingItem.Header)
                 is SeekBarViewHolder -> holder.bind(item as SettingItem.SeekBarItem)
                 is FloatSeekBarViewHolder -> holder.bind(item as SettingItem.FloatSeekBarItem)
+                is SpinnerViewHolder -> holder.bind(item as SettingItem.SpinnerItem)
             }
         }
 
@@ -297,6 +353,29 @@ class VrSettingsActivity : AppCompatActivity() {
 
             private fun updateValueText(value: Float) {
                 tvValue.text = String.format("%.3f", value)
+            }
+        }
+
+        inner class SpinnerViewHolder(view: View) : RecyclerView.ViewHolder(view) {
+            private val tvTitle: TextView = view.findViewById(R.id.tv_setting_title)
+            private val tvSummary: TextView = view.findViewById(R.id.tv_setting_summary)
+            private val spinner: Spinner = view.findViewById(R.id.spinner_setting)
+
+            fun bind(item: SettingItem.SpinnerItem) {
+                tvTitle.text = item.title
+                tvSummary.text = item.summary
+                
+                val adapter = ArrayAdapter<String>(context, android.R.layout.simple_spinner_item, item.entries)
+                adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)
+                spinner.adapter = adapter
+                spinner.setSelection(item.getValue())
+                
+                spinner.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+                    override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
+                        item.onChanged(position)
+                    }
+                    override fun onNothingSelected(parent: AdapterView<*>?) {}
+                }
             }
         }
     }

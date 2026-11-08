@@ -2,6 +2,7 @@ package com.vr2dapplauncher.shizuku
 
 import android.content.Context
 import android.graphics.SurfaceTexture
+import android.media.AudioDeviceInfo
 import android.opengl.GLES11Ext
 import android.opengl.GLES20
 import android.util.Log
@@ -53,6 +54,9 @@ class VrVirtualDisplayHost(private val context: Context) {
     var onGlThreadReady: ((Int) -> Unit)? = null
         private set
 
+    /** 音频路由器 */
+    private val audioRouter = AudioRouter(context)
+
     /**
      * 启动虚拟显示器（第一阶段：IO 线程）
      * 创建 SurfaceTexture(textureId=0) 和 Surface，启动虚拟显示器
@@ -87,7 +91,11 @@ class VrVirtualDisplayHost(private val context: Context) {
             // 6. 绑定输入设备
             InputRouter.bindAllExternalInputToDisplay(displayId)
 
-            // 7. 等待 GL 线程就绪，创建真实纹理并绑定
+            // 7. 启用音频路由 (默认路由到内置扬声器)
+            audioRouter.enableRouting(AudioDeviceInfo.TYPE_BUILTIN_SPEAKER)
+            audioRouter.startPlaybackMonitoring(displayId)
+
+            // 8. 等待 GL 线程就绪，创建真实纹理并绑定
             val deferred = CompletableDeferred<Boolean>()
             onGlThreadReady = { texId ->
                 glTextureId = texId
@@ -117,6 +125,8 @@ class VrVirtualDisplayHost(private val context: Context) {
     /** 停止并清理虚拟显示器 */
     fun stop() {
         Log.d(TAG, "Stopping virtual display host")
+        audioRouter.stopPlaybackMonitoring()
+        audioRouter.disableRouting()
         virtualDisplay?.release()
         cleanup()
     }

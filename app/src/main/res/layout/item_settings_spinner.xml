@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:orientation="vertical"
+    android:padding="16dp"
+    android:background="#2a2a2a"
+    android:layout_marginBottom="8dp">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:gravity="center_vertical"
+        android:layout_marginBottom="8dp">
+
+        <LinearLayout
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:orientation="vertical">
+
+            <TextView
+                android:id="@+id/tv_setting_title"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="设置项标题"
+                android:textSize="16sp"
+                android:textColor="#ffffff" />
+
+            <TextView
+                android:id="@+id/tv_setting_summary"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="设置项说明"
+                android:textSize="12sp"
+                android:textColor="#aaaaaa"
+                android:layout_marginTop="2dp" />
+        </LinearLayout>
+
+    </LinearLayout>
+
+    <Spinner
+        android:id="@+id/spinner_setting"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:backgroundTint="#2196f3"
+        android:popupBackground="#2a2a2a" />
+
+</LinearLayout>
