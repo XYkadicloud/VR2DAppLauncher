@@ -54,6 +54,14 @@
             android:screenOrientation="landscape"
             android:configChanges="orientation|screenSize|keyboardHidden" />
 
+        <!-- VR 设置 Activity -->
+        <activity
+            android:name=".ui.VrSettingsActivity"
+            android:exported="false"
+            android:launchMode="singleTop"
+            android:theme="@style/Theme.VR2DAppLauncher.NoActionBar"
+            android:windowSoftInputMode="adjustResize" />
+
         <!-- MediaProjection 服务（回退路径用） -->
         <service
             android:name=".shizuku.MediaProjectionService"

@@ -16,6 +16,7 @@ import com.vr2dapplauncher.shizuku.VrVirtualDisplayHost
  * - 头部追踪：Cardboard SDK 自动处理
  * - 手柄/键盘：传递给虚拟显示器（已通过 InputRouter 绑定）
  * - 返回键/菜单键：退出 VR 模式
+ * - 长按音量键：显示 VR 设置菜单（后续添加）
  */
 class VrActivity : AppCompatActivity() {
 
@@ -24,6 +25,7 @@ class VrActivity : AppCompatActivity() {
     private lateinit var cardboardView: CardboardView
     private lateinit var virtualDisplayHost: VrVirtualDisplayHost
     private lateinit var renderer: VrRenderer
+    private lateinit var settings: VrSettings
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -38,7 +40,10 @@ class VrActivity : AppCompatActivity() {
                 Log.w(TAG, "No virtual display host passed, creating new one")
             }
 
-        renderer = VrRenderer(this, virtualDisplayHost)
+        // 初始化 VR 设置
+        settings = VrSettings(this)
+
+        renderer = VrRenderer(this, virtualDisplayHost, settings)
         cardboardView.setRenderer(renderer)
         cardboardView.setDistortionCorrectionEnabled(true)
         cardboardView.setAsyncReprojectionEnabled(true)

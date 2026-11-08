@@ -44,6 +44,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var btnCreateVd: Button
     private lateinit var btnDestroyVd: Button
     private lateinit var btnEnterVr: Button
+    private lateinit var btnVrSettings: Button
 
     // 虚拟显示器宿主
     private var virtualDisplayHost: VrVirtualDisplayHost? = null
@@ -67,6 +68,7 @@ class MainActivity : AppCompatActivity() {
         btnCreateVd = findViewById(R.id.btn_create_vd)
         btnDestroyVd = findViewById(R.id.btn_destroy_vd)
         btnEnterVr = findViewById(R.id.btn_enter_vr)
+        btnVrSettings = findViewById(R.id.btn_vr_settings)
 
         // 初始状态：虚拟显示器未创建时禁用相关按钮
         setAppButtonsEnabled(false)
@@ -95,6 +97,9 @@ class MainActivity : AppCompatActivity() {
 
         // 进入 VR 模式
         btnEnterVr.setOnClickListener { enterVrMode() }
+
+        // VR 设置
+        btnVrSettings.setOnClickListener { openVrSettings() }
     }
 
     /** 检查 Shizuku 权限 */
@@ -210,6 +215,12 @@ class MainActivity : AppCompatActivity() {
         btnYouTube.isEnabled = enabled
         btnBrowser.isEnabled = enabled
         btnCustom.isEnabled = enabled
+    }
+
+    /** 打开 VR 设置 */
+    private fun openVrSettings() {
+        val intent = VrSettingsActivity.createIntent(this)
+        startActivity(intent)
     }
 
     override fun onResume() {

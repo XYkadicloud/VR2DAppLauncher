@@ -6,6 +6,7 @@ import android.opengl.GLES11Ext
 import android.opengl.GLES20
 import android.util.Log
 import android.view.Surface
+import com.vr2dapplauncher.vr.VrSettings
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -15,6 +16,7 @@ import kotlinx.coroutines.launch
  * VR 虚拟显示器宿主：管理虚拟显示器生命周期、SurfaceTexture、GL 纹理
  * 
  * 关键设计：GL 纹理必须在 GL 线程创建，SurfaceTexture 可在 IO 线程创建并稍后绑定
+ * 支持从 VrSettings 读取显示配置（分辨率、DPI、刷新率）
  */
 class VrVirtualDisplayHost(private val context: Context) {
     companion object {
@@ -24,12 +26,15 @@ class VrVirtualDisplayHost(private val context: Context) {
     private var virtualDisplay: android.hardware.display.VirtualDisplay? = null
     private var surfaceTexture: SurfaceTexture? = null
     private var surface: Surface? = null
+    
+    // 从设置读取显示参数
+    private val settings = VrSettings(context)
     private val args = VirtualDisplayManager.VirtualDisplayArgs(
         name = "VR2DAppLauncher-Display",
-        width = 1920,
-        height = 1080,
-        dpi = 320,
-        refreshRate = 60
+        width = settings.virtualDisplayWidth,
+        height = settings.virtualDisplayHeight,
+        dpi = settings.virtualDisplayDpi,
+        refreshRate = settings.virtualDisplayRefreshRate
     )
 
     /** 当前虚拟显示器 ID */
@@ -77,7 +82,7 @@ class VrVirtualDisplayHost(private val context: Context) {
         if (virtualDisplay != null) {
             displayId = virtualDisplay!!.display.displayId
             isRunning = true
-            Log.d(TAG, "Virtual display created: displayId=$displayId (awaiting GL thread)")
+            Log.d(TAG, "Virtual display created: displayId=$displayId, ${args.width}x${args.height}@${args.refreshRate}Hz, ${args.dpi}dpi (awaiting GL thread)")
 
             // 6. 绑定输入设备
             InputRouter.bindAllExternalInputToDisplay(displayId)
@@ -156,4 +161,7 @@ class VrVirtualDisplayHost(private val context: Context) {
 
     /** 获取 Surface 供 MediaCodec 等使用 */
     fun getSurface(): Surface? = surface
+    
+    /** 获取当前显示参数 */
+    fun getDisplayArgs(): VirtualDisplayManager.VirtualDisplayArgs = args
 }
